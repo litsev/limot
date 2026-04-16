@@ -36,7 +36,6 @@
               <div class="panel-head">
                 <div>
                   <h2>节点总览</h2>
-                  <p>实时状态由 节点 推送更新</p>
                 </div>
                 <el-button type="primary" plain @click="reloadConfig">重载配置</el-button>
               </div>
@@ -59,17 +58,26 @@
                   <div class="server-card-metrics">
                     <div class="server-metric">
                       <div class="server-metric-text">
-                        <label>CPU</label>
-                        <span>{{ formatPct(server.system?.cpu?.pct) }}</span>
+                        <label>平均负载(1/5/15/核)</label>
+                        <span>
+                          {{ formatFixed(server.system?.load?.one) }}/{{ formatFixed(server.system?.load?.five) }}/{{ formatFixed(server.system?.load?.fifteen) }}/{{ formatFixed(server.system?.load?.perCore) }}
+                        </span>
+                      </div>
+                    </div>
+                    <div class="server-metric">
+                      <div class="server-metric-text">
+                        <label>CPU/温度</label>
+                        <span>{{ formatPct(server.system?.cpu?.pct) }} ({{ server.system?.cpu?.tempC ? server.system.cpu.tempC + '°C' : '--' }})</span>
                       </div>
                       <div class="metric-bar">
                         <div class="metric-fill" :style="{ width: (server.system?.cpu?.pct || 0) + '%' }"></div>
                       </div>
                     </div>
+                    
                     <div class="server-metric">
                       <div class="server-metric-text">
-                        <label>内存使用率</label>
-                        <span>{{ formatPct(server.system?.memory?.pct) }}</span>
+                        <label>内存分配</label>
+                        <span>{{ formatBytes(server.system?.memory?.usedBytes) }} / {{ formatBytes(server.system?.memory?.totalBytes) }} ({{ formatPct(server.system?.memory?.pct) }})</span>
                       </div>
                       <div class="metric-bar">
                         <div class="metric-fill" :style="{ width: (server.system?.memory?.pct || 0) + '%' }"></div>
@@ -84,13 +92,13 @@
                         <div class="metric-fill" :style="{ width: (server.gpu?.summary?.utilizationPct || 0) + '%' }"></div>
                       </div>
                     </div>
-                    <div class="server-metric" v-if="server.filesystems?.length > 0">
+                    <div class="server-metric" v-for="fs in server.filesystems" :key="fs.mount">
                       <div class="server-metric-text">
-                        <label>磁盘使用率({{ server.filesystems[0].mount }})</label>
-                        <span>{{ formatPct(server.filesystems[0].usedPct) }}</span>
+                        <label>磁盘({{ fs.mount }})</label>
+                        <span>{{ formatBytes(fs.usedBytes) }} / {{ formatBytes(fs.totalBytes) }} ({{ fs.usedPct }}%)</span>
                       </div>
                       <div class="metric-bar">
-                        <div class="metric-fill" :style="{ width: (server.filesystems[0].usedPct || 0) + '%' }"></div>
+                        <div class="metric-fill" :style="{ width: (fs.usedPct || 0) + '%' }"></div>
                       </div>
                     </div>
                   </div>
@@ -111,7 +119,6 @@
               <div class="panel-head">
                 <div>
                   <h2>{{ selectedServer.id }}</h2>
-                  <p>服务器 ID</p>
                 </div>
                 <div class="filters" style="align-items: center;">
                   <span style="font-size: 13px; color: var(--el-text-color-regular);">时间范围：</span>
@@ -154,37 +161,6 @@
               </div>
 
               <div class="metric-strip">
-                <div class="metric-row">
-                  <div class="metric-pill">
-                    <label>平均负载(1/5/15/perCore)</label>
-                    <strong>
-                      {{ formatFixed(selectedServer.system?.load?.one) }} / 
-                      {{ formatFixed(selectedServer.system?.load?.five) }} / 
-                      {{ formatFixed(selectedServer.system?.load?.fifteen) }} /
-                      {{ formatFixed(selectedServer.system?.load?.perCore) }}
-                    </strong>
-                  </div>
-                  <div class="metric-pill">
-                    <label>CPU使用率/温度</label>
-                    <strong>{{ formatPct(selectedServer.system?.cpu?.pct) }}
-                      ({{ selectedServer.system?.cpu?.tempC ? selectedServer.system.cpu.tempC + '°C' : '--' }})
-                    </strong>
-                  </div>
-                  <div class="metric-pill">
-                    <label>内存使用情况</label>
-                    <strong>{{ formatBytes(selectedServer.system?.memory?.usedBytes) }} /
-                      {{ formatBytes(selectedServer.system?.memory?.totalBytes) }}
-                      ({{ formatPct(selectedServer.system?.memory?.pct) }})
-                    </strong>
-                  </div>
-                  <div class="metric-pill" v-for="fs in selectedServer.filesystems" :key="fs.mount">
-                    <label>文件系统({{ fs.mount }})</label>
-                    <strong>{{ formatBytes(fs.usedBytes) }} /
-                      {{ formatBytes(fs.totalBytes) }}
-                      ({{ fs.usedPct }}%)
-                    </strong>
-                  </div>
-                </div>
               </div>
 
               <div class="chart-grid">
@@ -227,7 +203,10 @@
                 </div>
 
                 <div class="chart-card">
-                  <div class="chart-title">指定目录磁盘占用</div>
+                  <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>指定目录磁盘占用</span>
+                    <el-input v-model="directoryFilter" placeholder="搜索目录/用户..." size="small" style="width: 200px;" clearable></el-input>
+                  </div>
                   <div id="directory-chart" class="chart"></div>
                 </div>
 

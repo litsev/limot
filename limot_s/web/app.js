@@ -23,14 +23,18 @@ function formatBytes(value) {
 function baseChartOption(title, xAxisData, series, yAxis = [{}]) {
   return {
     animationDuration: 350,
-    color: ["#0d7a70", "#cb6b2d", "#355c7d", "#8f9f57"],
+    color: [
+      "#0d7a70", "#cb6b2d", "#355c7d", "#8f9f57", "#2b908f", 
+      "#f9a52c", "#47b8e0", "#ff7473", "#ffc952", "#a2d5f2"
+    ],
     grid: {
       left: 46,
       right: 40,
-      top: 42,
+      top: 130, // Default larger top to fit 5 rows for legends wrapping
       bottom: 34
     },
     legend: {
+      type: "plain",
       top: 0
     },
     tooltip: {
@@ -52,6 +56,7 @@ createApp({
     const publicConfig = reactive({});
     const selectedServerId = ref("");
     const hoursRange = ref(24);
+    const directoryFilter = ref("");
     const alertRows = ref([]);
     const hiddenAlertKeys = ref(new Set());
 
@@ -372,7 +377,12 @@ createApp({
         return;
       }
 
-      const dirKeys = [...new Set(history.directory.map((r) => r.dirKey))];
+      let dirKeys = [...new Set(history.directory.map((r) => r.dirKey))];
+      const filterLower = directoryFilter.value.trim().toLowerCase();
+      if (filterLower) {
+        dirKeys = dirKeys.filter((key) => key.toLowerCase().includes(filterLower));
+      }
+
       const tsSet = [...new Set(history.directory.map((r) => r.ts))].sort();
       const xAxis = tsSet.map((ts) => formatDateTime(ts));
 
@@ -431,7 +441,12 @@ createApp({
       });
     }
 
+    watch(directoryFilter, () => {
+      renderDirectoryChart();
+    });
+
     watch(selectedServerId, async () => {
+      directoryFilter.value = "";
       await nextTick();
       await refreshSelectedServer();
     });
@@ -455,6 +470,7 @@ createApp({
     });
 
     return {
+      directoryFilter,
       alertRows,
       clearAlert,
       clearAllAlerts,

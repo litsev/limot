@@ -372,6 +372,10 @@ body {
   height: 280px;
 }
 
+#directory-chart {
+  height: max(300px, calc(100vh - 500px));
+}
+
 .table-section {
   margin-top: 14px;
 }

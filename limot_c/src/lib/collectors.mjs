@@ -193,7 +193,7 @@ export async function collectDirectoryMetrics(runtimeConfig) {
     try {
       const entries = await readdir(scanPath, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isDirectory()) {
+        if (entry.isDirectory() && !entry.name.startsWith('.')) {
           // excludePaths支持常见的通配符形式，比如 * 或 ?
           const isExcluded = excludePaths.some(pattern => {
             if (pattern.includes("*") || pattern.includes("?")) {
