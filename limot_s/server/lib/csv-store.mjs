@@ -287,20 +287,25 @@ export class CsvStore {
     if (!this.initializingFiles) {
       this.initializingFiles = new Map();
     }
-    
-    if (this.initializingFiles.has(filePath)) {
-      await this.initializingFiles.get(filePath);
-    } else {
-      const initPromise = (async () => {
-        const exists = await this.fileExists(filePath);
-        if (!exists) {
-          await appendFile(filePath, `${headers.join(",")}\n`, "utf8");
+
+    let initPromise = this.initializingFiles.get(filePath);
+    if (!initPromise) {
+      initPromise = (async () => {
+        try {
+          const exists = await this.fileExists(filePath);
+          if (!exists) {
+            await appendFile(filePath, `${headers.join(",")}\n`, "utf8");
+          }
+        } finally {
+          if (this.initializingFiles.get(filePath) === initPromise) {
+            this.initializingFiles.delete(filePath);
+          }
         }
       })();
       this.initializingFiles.set(filePath, initPromise);
-      await initPromise;
     }
 
+    await initPromise;
     await appendFile(filePath, toCsvRow(headers, values), "utf8");
   }
 

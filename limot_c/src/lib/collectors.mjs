@@ -240,7 +240,15 @@ export async function collectDirectoryMetrics(runtimeConfig) {
     const cached = directoryCache.get(dirPath);
     if (cached && now - cached.lastScannedAt < scanIntervalSec * 1000) {
       // 未到点时，因为之前生成过了并且在服务端已经落地记录，
-      // 所以我们直接跳过，不放入results，从而避免往服务端发重复数据。
+      // 我们标记isCached: true避免往服务端发重复数据，同时保留以供告警计算
+      results.push({
+        key: dirPath,
+        path: dirPath,
+        owner: owner,
+        warnGB: ruleWarnGB,
+        sizeBytes: cached.sizeBytes,
+        isCached: true
+      });
       continue;
     }
 

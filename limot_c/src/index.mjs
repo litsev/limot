@@ -27,11 +27,18 @@ const logPath = resolve(logsDir, "agent.log");
 let stopping = false;
 let lastError = null;
 const previousAlertEntries = (await readJsonFile(alertStatePath, [])) ?? [];
-let previousAlerts = new Map(
-  previousAlertEntries
-    .filter((entry) => entry?.id)
-    .map((entry) => [entry.id, entry])
-);
+let previousBaseAlerts = new Map();
+let previousDirectoryAlerts = new Map();
+
+for (const entry of previousAlertEntries) {
+  if (entry?.id) {
+    if (entry.id.startsWith("directory:")) {
+      previousDirectoryAlerts.set(entry.id, entry);
+    } else {
+      previousBaseAlerts.set(entry.id, entry);
+    }
+  }
+}
 
 const cachedRuntimeConfig =
   (await readJsonFile(runtimeConfigCachePath, null)) ?? bootstrap.fallbackRuntimeConfig;
@@ -60,31 +67,34 @@ async function agentRequest(route, payload) {
   });
 }
 
-function diffAlertEvents(currentAlerts) {
+function diffAlertEvents(currentAlerts, scope) {
   const currentMap = new Map(currentAlerts.map((alert) => [alert.id, alert]));
-  const allAlerts = [];
-
-  // 新增或仍活跃的告警
-  for (const alert of currentAlerts) {
-    allAlerts.push(alert);
-  }
+  const newlyResolved = [];
+  const previousMap = scope === 'directory' ? previousDirectoryAlerts : previousBaseAlerts;
 
   // 已解决的告警（之前存在，现在不存在）
-  for (const [alertId, previousAlert] of previousAlerts.entries()) {
+  for (const [alertId, previousAlert] of previousMap.entries()) {
     if (!currentMap.has(alertId)) {
-      allAlerts.push({
+      newlyResolved.push({
         ...previousAlert,
         status: "resolved"
       });
     }
   }
 
-  previousAlerts = currentMap;
-  return allAlerts;
+  if (scope === 'directory') {
+    previousDirectoryAlerts = currentMap;
+  } else {
+    previousBaseAlerts = currentMap;
+  }
+  
+  const allActive = [...previousBaseAlerts.values(), ...previousDirectoryAlerts.values()];
+  return [...allActive, ...newlyResolved];
 }
 
 async function persistAlertState() {
-  await writeJsonFile(alertStatePath, Array.from(previousAlerts.values()));
+  const combined = [...previousBaseAlerts.values(), ...previousDirectoryAlerts.values()];
+  await writeJsonFile(alertStatePath, combined);
 }
 
 async function syncRuntimeConfig() {
@@ -128,7 +138,7 @@ async function buildReportPayload() {
   };
 
   const currentAlerts = buildCurrentAlerts(report, config);
-  const allAlerts = diffAlertEvents(currentAlerts);
+  const allAlerts = diffAlertEvents(currentAlerts, 'base');
   await persistAlertState();
 
   return {
@@ -152,10 +162,10 @@ async function directoryLoop() {
       const directoryAlerts = buildCurrentAlerts({ directories }, config);
       const report = {
         collectedAt: new Date().toISOString(),
-        directories
+        directories: directories.filter(d => !d.isCached)
       };
       
-      const reportAlerts = diffAlertEvents(directoryAlerts);
+      const reportAlerts = diffAlertEvents(directoryAlerts, 'directory');
       await persistAlertState();
       
       const payload = {

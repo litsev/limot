@@ -66,7 +66,7 @@
                     </div>
                     <div class="server-metric">
                       <div class="server-metric-text">
-                        <label>CPU/温度</label>
+                        <label>CPU使用率/温度</label>
                         <span>{{ formatPct(server.system?.cpu?.pct) }} ({{ server.system?.cpu?.tempC ? server.system.cpu.tempC + '°C' : '--' }})</span>
                       </div>
                       <div class="metric-bar">
@@ -76,7 +76,7 @@
                     
                     <div class="server-metric">
                       <div class="server-metric-text">
-                        <label>内存分配</label>
+                        <label>内存使用情况</label>
                         <span>{{ formatBytes(server.system?.memory?.usedBytes) }} / {{ formatBytes(server.system?.memory?.totalBytes) }} ({{ formatPct(server.system?.memory?.pct) }})</span>
                       </div>
                       <div class="metric-bar">
