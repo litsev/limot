@@ -378,9 +378,9 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
     let alertDetails = [];
     try {
       const { stdout } = await execFileAsync("sh", ["-c", "ps -eo pid,%mem,comm --sort=-%mem | head -n 4 | tail -n 3"]);
-      const lines = stdout.trim().split("\\n");
+      const lines = stdout.trim().split(/\r?\n/);
       const pids = lines.map(line => {
-        const parts = line.trim().split(/\\s+/);
+        const parts = line.trim().split(/\s+/);
         return { pid: parts[0], comm: parts.slice(2).join(" "), mem: parts[1] };
       }).filter(p => p.pid && !isNaN(p.pid));
       
