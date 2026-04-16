@@ -193,21 +193,21 @@
                 </div>
 
                 <div class="chart-card">
-                  <div class="chart-title">CPU / 内存 / 负载 / GPU</div>
+                  <div class="chart-title">CPU / 内存 / 负载 / GPU / 显存</div>
                   <div id="system-chart" class="chart"></div>
                 </div>
 
                 <div class="chart-card">
-                  <div class="chart-title">文件系统使用率</div>
-                  <div id="filesystem-chart" class="chart"></div>
-                </div>
-
-                <div class="chart-card">
                   <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>指定目录磁盘占用</span>
+                    <span>目录大小折线图</span>
                     <el-input v-model="directoryFilter" placeholder="搜索目录/用户..." size="small" style="width: 200px;" clearable></el-input>
                   </div>
                   <div id="directory-chart" class="chart"></div>
+                </div>
+
+                <div class="chart-card">
+                  <div class="chart-title">磁盘使用率</div>
+                  <div id="filesystem-chart" class="chart"></div>
                 </div>
 
                 <div class="chart-card">

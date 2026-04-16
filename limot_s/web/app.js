@@ -24,8 +24,10 @@ function baseChartOption(title, xAxisData, series, yAxis = [{}]) {
   return {
     animationDuration: 350,
     color: [
-      "#0d7a70", "#cb6b2d", "#355c7d", "#8f9f57", "#2b908f", 
-      "#f9a52c", "#47b8e0", "#ff7473", "#ffc952", "#a2d5f2"
+      "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+      "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#fabebe",
+      "#008080", "#e6beff", "#9a6324", "#fffac8", "#800000",
+      "#aaffc3", "#808000", "#ffd8b1", "#000075", "#808080"
     ],
     grid: {
       left: 46,
@@ -271,6 +273,12 @@ createApp({
             type: "line",
             smooth: true,
             data: history.system.map((row) => row.gpuPct)
+          },
+          {
+            name: "显存 %",
+            type: "line",
+            smooth: true,
+            data: history.system.map((row) => row.gpuMemPct)
           },
           {
             name: "负载/核",
