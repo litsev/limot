@@ -1,0 +1,38 @@
+id: "pc"
+# 是否启用此客户端
+enabled: true
+
+# 告警阈值配置
+thresholds:
+  # CPU使用率警告阈值（%）
+  cpuWarn: 90
+  # 内存使用率警告阈值（%）
+  memWarn: 90
+  # 磁盘使用率警告阈值（%）
+  diskWarn: 95
+  # 单核负载警告阈值
+  load1PerCoreWarn: 0.8
+  # GPU使用率警告阈值（%）
+  gpuWarn: 90
+
+# 文件系统配置
+filesystems:
+  # 包含的挂载点列表（空列表表示不过滤）
+  includeMounts:
+    - /
+  # 排除的文件系统类型
+  excludeFsTypes:
+    - tmpfs
+    - devtmpfs
+    - overlay
+    - squashfs
+
+# 需要监控的目录列表
+directories:
+  - path: /home
+    exclude:
+      - lost+found
+      - ./.* # 隐藏文件或目录
+    warnGB: 150
+    timeoutSec: 300
+    scanIntervalSec: 180

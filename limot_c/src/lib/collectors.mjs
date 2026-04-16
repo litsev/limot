@@ -377,15 +377,45 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
     let extraMsg = "";
     let alertDetails = [];
     try {
-      const { stdout } = await execFileAsync("sh", ["-c", "ps -eo pid,%mem,comm --sort=-%mem | head -n 4 | tail -n 3"]);
-      const lines = stdout.trim().split(/\r?\n/);
-      const pids = lines.map(line => {
+      const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,%mem,comm"]);
+      const lines = stdout.trim().split(/\r?\n/).slice(1);
+      const procMap = new Map();
+      
+      for (const line of lines) {
+        if (!line.trim()) continue;
         const parts = line.trim().split(/\s+/);
-        return { pid: parts[0], comm: parts.slice(2).join(" "), mem: parts[1] };
-      }).filter(p => p.pid && !isNaN(p.pid));
+        procMap.set(parts[0], {
+          pid: parts[0],
+          ppid: parts[1],
+          mem: parseFloat(parts[2]) || 0,
+          comm: parts.slice(3).join(" ")
+        });
+      }
+
+      const roots = new Map();
+      const ignoreNames = new Set(['bash', 'zsh', 'sh', 'dash', 'tmux', 'tmux: server', 'sshd', 'systemd', 'init']);
+
+      for (const p of procMap.values()) {
+        let curr = p;
+        while (procMap.has(curr.ppid)) {
+          const parent = procMap.get(curr.ppid);
+          if (parent.pid === "1" || parent.pid === "2") break;
+          if (ignoreNames.has(parent.comm)) break;
+          curr = parent;
+        }
+        if (!roots.has(curr.pid)) {
+          roots.set(curr.pid, { pid: curr.pid, mem: 0, comm: curr.comm });
+        }
+        roots.get(curr.pid).mem += p.mem;
+      }
+      
+      const topPids = Array.from(roots.values())
+        .sort((a, b) => b.mem - a.mem)
+        .slice(0, 3)
+        .map(g => ({ pid: g.pid, mem: g.mem.toFixed(1), comm: g.comm }));
       
       const fs = await import("node:fs/promises");
-      for (const p of pids) {
+      for (const p of topPids) {
         try {
           const cwd = await fs.readlink(`/proc/${p.pid}/cwd`);
           alertDetails.push(`PID: ${p.pid} | 程序: ${p.comm} | 内存: ${p.mem}% | 目录: ${cwd}`);
