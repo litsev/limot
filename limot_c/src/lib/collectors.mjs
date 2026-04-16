@@ -375,22 +375,23 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
 
   if (report.system && report.system.memory.pct >= thresholds.memWarn) {
     let extraMsg = "";
+    let alertDetails = [];
     try {
       const { stdout } = await execFileAsync("sh", ["-c", "ps -eo pid,%mem,comm --sort=-%mem | head -n 4 | tail -n 3"]);
       const lines = stdout.trim().split("\\n");
-      const pids = lines.map(line => line.trim().split(/\\s+/)[0]).filter(p => p && !isNaN(p));
-      const details = [];
+      const pids = lines.map(line => {
+        const parts = line.trim().split(/\\s+/);
+        return { pid: parts[0], comm: parts.slice(2).join(" "), mem: parts[1] };
+      }).filter(p => p.pid && !isNaN(p.pid));
+      
       const fs = await import("node:fs/promises");
-      for (const pid of pids) {
+      for (const p of pids) {
         try {
-          const cwd = await fs.readlink(`/proc/${pid}/cwd`);
-          details.push(`PID: ${pid} (${cwd})`);
+          const cwd = await fs.readlink(`/proc/${p.pid}/cwd`);
+          alertDetails.push(`PID: ${p.pid} | 程序: ${p.comm} | 内存: ${p.mem}% | 目录: ${cwd}`);
         } catch {
-          details.push(`PID: ${pid} (未知目录)`);
+          alertDetails.push(`PID: ${p.pid} | 程序: ${p.comm} | 内存: ${p.mem}% | 目录: (未知)`);
         }
-      }
-      if (details.length) {
-        extraMsg = `。Top 3 进程: ${details.join(", ")}`;
       }
     } catch (e) {}
 
@@ -402,7 +403,8 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
       level: chooseAlertLevel(report.system.memory.pct, thresholds.memWarn),
       currentValue: report.system.memory.pct,
       threshold: thresholds.memWarn,
-      message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%${extraMsg}`,
+      message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%`,
+      alertDetails: alertDetails.length ? alertDetails : null,
       detectedAt: report.collectedAt
     });
   }

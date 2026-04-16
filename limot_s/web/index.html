@@ -151,9 +151,17 @@
                     style="margin-bottom: 10px;"
                   >
                     <template #default>
-                      <div style="font-size: 13px; margin-top: 4px; display: flex; gap: 16px; color: var(--el-text-color-regular);">
-                        <span><strong>来源:</strong> {{ alert.source }}</span>
-                        <span><strong>触发值:</strong> {{ alert.currentValue }} (阈值: {{ alert.threshold }})</span>
+                      <div style="font-size: 13px; margin-top: 4px; display: flex; flex-direction: column; gap: 8px; color: var(--el-text-color-regular);">
+                        <div style="display: flex; gap: 16px;">
+                          <span><strong>来源:</strong> {{ alert.source }}</span>
+                          <span><strong>触发值:</strong> {{ alert.currentValue }} (阈值: {{ alert.threshold }})</span>
+                        </div>
+                        <div v-if="alert.alertDetails && alert.alertDetails.length > 0">
+                          <strong>异常进程 (Top 3):</strong>
+                          <ul style="margin: 4px 0 0 20px; padding: 0;">
+                            <li v-for="(detail, idx) in alert.alertDetails" :key="idx">{{ detail }}</li>
+                          </ul>
+                        </div>
                       </div>
                     </template>
                   </el-alert>
