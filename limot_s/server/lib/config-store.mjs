@@ -1,6 +1,7 @@
 import { watch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import YAML from "js-yaml";
 
 const DEFAULT_CONFIG = {
   defaults: {
@@ -52,7 +53,15 @@ export class ConfigStore {
 
   async load(reason = "manual") {
     const raw = await readFile(this.configPath, "utf8");
-    const parsed = JSON.parse(raw);
+    
+    // Parse based on file extension
+    let parsed;
+    if (this.configPath.endsWith(".yaml") || this.configPath.endsWith(".yml")) {
+      parsed = YAML.load(raw);
+    } else {
+      parsed = JSON.parse(raw);
+    }
+    
     const merged = deepMerge(DEFAULT_CONFIG, parsed);
 
     this.config = merged;

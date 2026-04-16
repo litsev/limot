@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.1"
   }
 }
-

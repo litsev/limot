@@ -4,14 +4,14 @@ import { resolve } from "node:path";
 import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics } from "./lib/collectors.mjs";
 import { postJson } from "./lib/http-client.mjs";
 import { enqueueOutbox, flushOutbox, outboxCount } from "./lib/outbox.mjs";
-import { appendLog, readJsonFile, sleep, writeJsonFile } from "./lib/utils.mjs";
+import { appendLog, readJsonFile, readConfigFile, sleep, writeJsonFile } from "./lib/utils.mjs";
 
 const AGENT_VERSION = "0.1.0";
 const DEFAULT_BOOTSTRAP_PATH = resolve(
-  new URL("../config/bootstrap.json", import.meta.url).pathname
+  new URL("../config/bootstrap.yaml", import.meta.url).pathname
 );
 const bootstrapPath = resolve(process.argv[2] ?? DEFAULT_BOOTSTRAP_PATH);
-const bootstrap = await readJsonFile(bootstrapPath);
+const bootstrap = await readConfigFile(bootstrapPath);
 
 if (!bootstrap) {
   throw new Error(`Bootstrap config not found: ${bootstrapPath}`);

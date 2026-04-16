@@ -4,4 +4,4 @@ limot_c/cache/*
 !limot_c/cache/.gitkeep
 limot_c/logs/*
 !limot_c/logs/.gitkeep
-
+node_modules/

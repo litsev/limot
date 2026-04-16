@@ -16,7 +16,7 @@ import { MonitorStore } from "./lib/monitor-store.mjs";
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB_ROOT = resolve(PROJECT_ROOT, "web");
 const DATA_ROOT = resolve(PROJECT_ROOT, "data");
-const CONFIG_PATH = resolve(PROJECT_ROOT, "config", "monitoring.json");
+const CONFIG_PATH = resolve(PROJECT_ROOT, "config", "monitoring.yaml");
 
 const configStore = new ConfigStore(CONFIG_PATH);
 await configStore.load("startup");
