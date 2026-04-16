@@ -5,3 +5,5 @@ limot_c/cache/*
 limot_c/logs/*
 !limot_c/logs/.gitkeep
 node_modules/
+limot_s/config.yaml
+limot_c/config.yaml

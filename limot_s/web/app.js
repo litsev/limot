@@ -30,7 +30,7 @@ function baseChartOption(title, xAxisData, series, yAxis = [{}]) {
     grid: {
       left: 46,
       right: 40,
-      top: 130, // Default larger top to fit 5 rows for legends wrapping
+      top: 90, // Default larger top to fit 5 rows for legends wrapping
       bottom: 34
     },
     legend: {
