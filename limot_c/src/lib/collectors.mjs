@@ -1,6 +1,7 @@
 import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
 
 import { sleep } from "./utils.mjs";
 
@@ -13,24 +14,61 @@ function summarizeCpuSnapshot() {
   }));
 }
 
-async function sampleCpuUsage(intervalMs = 250) {
-  const start = summarizeCpuSnapshot();
-  await sleep(intervalMs);
-  const end = summarizeCpuSnapshot();
-
-  let idleDelta = 0;
-  let totalDelta = 0;
-
-  for (let index = 0; index < start.length; index += 1) {
-    idleDelta += end[index].idle - start[index].idle;
-    totalDelta += end[index].total - start[index].total;
+class CpuSampler {
+  constructor(intervalMs = 1000) {
+    this.intervalMs = intervalMs;
+    this.cached = 0;
+    this.lastSnapshot = summarizeCpuSnapshot();
+    this.started = false;
   }
 
-  if (totalDelta <= 0) {
-    return 0;
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this.timer = setInterval(() => {
+      this.update();
+    }, this.intervalMs);
+    this.timer.unref(); // 不阻塞进程退出
   }
 
-  return Number((((totalDelta - idleDelta) / totalDelta) * 100).toFixed(2));
+  async update() {
+    const end = summarizeCpuSnapshot();
+    let idleDelta = 0;
+    let totalDelta = 0;
+
+    for (let index = 0; index < this.lastSnapshot.length; index += 1) {
+      idleDelta += end[index].idle - this.lastSnapshot[index].idle;
+      totalDelta += end[index].total - this.lastSnapshot[index].total;
+    }
+
+    this.cached = totalDelta > 0 ? Number((((totalDelta - idleDelta) / totalDelta) * 100).toFixed(2)) : 0;
+    this.lastSnapshot = end;
+  }
+
+  getCachedValue() {
+    return this.cached;
+  }
+
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
+    this.started = false;
+  }
+}
+
+const cpuSampler = new CpuSampler();
+
+export function startCpuSampler() {
+  cpuSampler.start();
+}
+
+export function stopCpuSampler() {
+  cpuSampler.stop();
+}
+
+function getCpuUsageCached() {
+  return cpuSampler.getCachedValue();
 }
 
 function parseDfLine(line) {
@@ -58,11 +96,44 @@ function chooseAlertLevel(currentValue, threshold) {
   return "warn";
 }
 
+async function collectCpuTemperature() {
+  try {
+    // 尝试读取Linux thermal zone温度
+    const tempFile = "/sys/class/thermal/thermal_zone0/temp";
+    const content = await readFile(tempFile, "utf-8");
+    const tempMilliC = Number(content.trim());
+    if (Number.isFinite(tempMilliC) && tempMilliC > 0) {
+      // 转换为摄氏度（文件中是毫摄氏度）
+      return Number((tempMilliC / 1000).toFixed(1));
+    }
+  } catch {
+    // thermal zone不可用，继续尝试其他方法
+  }
+
+  try {
+    // 尝试使用sensors命令（需要lm-sensors）
+    const { stdout } = await execFileAsync("sensors", ["-A", "-u"], { timeout: 2000 });
+    // 简单匹配Package id或Core温度
+    const match = stdout.match(/Package id.*?:\s+([\d.]+)\s*°?C|Core\s+\d+.*?:\s+([\d.]+)\s*°?C/);
+    if (match) {
+      const temp = Number(match[1] || match[2]);
+      if (Number.isFinite(temp)) {
+        return Number(temp.toFixed(1));
+      }
+    }
+  } catch {
+    // sensors命令不可用
+  }
+
+  return null;
+}
+
 export async function collectSystemMetrics() {
   const totalMem = os.totalmem();
   const freeMem = os.freemem();
   const usedMem = totalMem - freeMem;
-  const cpuPct = await sampleCpuUsage();
+  const cpuPct = getCpuUsageCached();
+  const cpuTemp = await collectCpuTemperature();
   const load = os.loadavg();
   const coreCount = Math.max(os.cpus().length, 1);
 
@@ -74,7 +145,8 @@ export async function collectSystemMetrics() {
     uptimeSec: Math.floor(os.uptime()),
     cpu: {
       pct: cpuPct,
-      cores: coreCount
+      cores: coreCount,
+      tempC: cpuTemp
     },
     memory: {
       totalBytes: totalMem,
@@ -167,10 +239,14 @@ export async function collectGpuMetrics() {
       }));
 
     const utilizationPct = devices.length
-      ? Math.max(...devices.map((device) => device.utilizationPct))
+      ? Number((devices.reduce((sum, d) => sum + d.utilizationPct, 0) / devices.length).toFixed(2))
       : null;
-    const memoryPct = devices.length
-      ? Math.max(...devices.map((device) => device.memoryPct))
+    
+    // 显存合计值：所有GPU总显存使用量 / 总容量 * 100
+    const totalMemoryUsedMiB = devices.reduce((sum, d) => sum + d.memoryUsedMiB, 0);
+    const totalMemoryMiB = devices.reduce((sum, d) => sum + d.memoryTotalMiB, 0);
+    const memoryPct = totalMemoryMiB > 0
+      ? Number(((totalMemoryUsedMiB / totalMemoryMiB) * 100).toFixed(2))
       : null;
 
     return {
@@ -199,49 +275,62 @@ export function buildCurrentAlerts(report, runtimeConfig) {
 
   if (report.system.cpu.pct >= thresholds.cpuWarn) {
     alerts.push({
+      id: "cpu",
       alertKey: "cpu",
       source: "cpu",
+      status: "active",
       level: chooseAlertLevel(report.system.cpu.pct, thresholds.cpuWarn),
       currentValue: report.system.cpu.pct,
       threshold: thresholds.cpuWarn,
-      message: `CPU 使用率达到 ${report.system.cpu.pct.toFixed(1)}%`
+      message: `CPU 使用率达到 ${report.system.cpu.pct.toFixed(1)}%`,
+      detectedAt: report.collectedAt
     });
   }
 
   if (report.system.memory.pct >= thresholds.memWarn) {
     alerts.push({
+      id: "memory",
       alertKey: "memory",
       source: "memory",
+      status: "active",
       level: chooseAlertLevel(report.system.memory.pct, thresholds.memWarn),
       currentValue: report.system.memory.pct,
       threshold: thresholds.memWarn,
-      message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%`
+      message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%`,
+      detectedAt: report.collectedAt
     });
   }
 
   if (report.system.load.perCore >= thresholds.load1PerCoreWarn) {
     alerts.push({
+      id: "load-per-core",
       alertKey: "load-per-core",
       source: "load",
+      status: "active",
       level: chooseAlertLevel(
         report.system.load.perCore * 100,
         thresholds.load1PerCoreWarn * 100
       ),
       currentValue: report.system.load.perCore,
       threshold: thresholds.load1PerCoreWarn,
-      message: `每核 1 分钟负载达到 ${report.system.load.perCore.toFixed(2)}`
+      message: `每核 1 分钟负载达到 ${report.system.load.perCore.toFixed(2)}`,
+      detectedAt: report.collectedAt
     });
   }
+  
 
   for (const filesystem of report.filesystems) {
     if (filesystem.usedPct >= thresholds.diskWarn) {
       alerts.push({
+        id: `filesystem:${filesystem.mount}`,
         alertKey: `filesystem:${filesystem.mount}`,
         source: `filesystem:${filesystem.mount}`,
+        status: "active",
         level: chooseAlertLevel(filesystem.usedPct, thresholds.diskWarn),
         currentValue: filesystem.usedPct,
         threshold: thresholds.diskWarn,
-        message: `挂载点 ${filesystem.mount} 使用率达到 ${filesystem.usedPct.toFixed(1)}%`
+        message: `挂载点 ${filesystem.mount} 使用率达到 ${filesystem.usedPct.toFixed(1)}%`,
+        detectedAt: report.collectedAt
       });
     }
   }
@@ -257,12 +346,15 @@ export function buildCurrentAlerts(report, runtimeConfig) {
     const currentGb = directory.sizeBytes / (1024 ** 3);
     if (currentGb >= rule.warnGB) {
       alerts.push({
+        id: `directory:${directory.key}`,
         alertKey: `directory:${directory.key}`,
         source: `directory:${directory.path}`,
+        status: "active",
         level: chooseAlertLevel(currentGb, rule.warnGB),
         currentValue: Number(currentGb.toFixed(2)),
         threshold: rule.warnGB,
-        message: `目录 ${directory.path} 占用达到 ${currentGb.toFixed(2)} GB`
+        message: `目录 ${directory.path} 占用达到 ${currentGb.toFixed(2)} GB`,
+        detectedAt: report.collectedAt
       });
     }
   }
@@ -273,12 +365,15 @@ export function buildCurrentAlerts(report, runtimeConfig) {
     report.gpu.summary.utilizationPct >= thresholds.gpuWarn
   ) {
     alerts.push({
+      id: "gpu",
       alertKey: "gpu",
       source: "gpu",
+      status: "active",
       level: chooseAlertLevel(report.gpu.summary.utilizationPct, thresholds.gpuWarn),
       currentValue: report.gpu.summary.utilizationPct,
       threshold: thresholds.gpuWarn,
-      message: `GPU 使用率达到 ${report.gpu.summary.utilizationPct.toFixed(1)}%`
+      message: `GPU 使用率达到 ${report.gpu.summary.utilizationPct.toFixed(1)}%`,
+      detectedAt: report.collectedAt
     });
   }
 

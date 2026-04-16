@@ -31,12 +31,12 @@
         </div>
 
         <el-row :gutter="18">
-          <el-col :xs="24" :lg="9">
+          <el-col :xs="24" :lg="8">
             <section class="panel">
               <div class="panel-head">
                 <div>
                   <h2>节点总览</h2>
-                  <p>实时状态由 SSE 推送更新</p>
+                  <p>实时状态由 节点 推送更新</p>
                 </div>
                 <el-button type="primary" plain @click="reloadConfig">重载配置</el-button>
               </div>
@@ -62,16 +62,12 @@
                       <span>{{ formatPct(server.system?.cpu?.pct) }}</span>
                     </div>
                     <div>
-                      <label>内存</label>
+                      <label>内存使用率</label>
                       <span>{{ formatPct(server.system?.memory?.pct) }}</span>
                     </div>
                     <div>
-                      <label>GPU</label>
-                      <span>{{ formatPct(server.gpu?.summary?.utilizationPct) }}</span>
-                    </div>
-                    <div>
-                      <label>告警</label>
-                      <span>{{ server.currentAlerts?.length ?? 0 }}</span>
+                      <label>GPU使用率</label>
+                      <span>{{ server.gpu?.available ? formatPct(server.gpu.summary?.utilizationPct) : '--' }}</span>
                     </div>
                   </div>
                   <small>最近心跳：{{ formatDateTime(server.lastSeen) }}</small>
@@ -80,7 +76,7 @@
             </section>
           </el-col>
 
-          <el-col :xs="24" :lg="15">
+          <el-col :xs="24" :lg="16">
             <section class="panel detail-panel" v-if="selectedServer">
               <div class="panel-head">
                 <div>
@@ -93,79 +89,122 @@
                     <el-option label="最近 24 小时" :value="24" />
                     <el-option label="最近 72 小时" :value="72" />
                   </el-select>
-                  <el-select
-                    v-model="selectedMount"
-                    size="small"
-                    placeholder="选择挂载点"
-                    @change="loadFilesystemHistory"
+                </div>
+              </div>
+
+              <div class="chart-card current-alerts-card" v-if="visibleAlerts.length > 0" style="margin-bottom: 20px; border: 1px solid var(--el-color-danger-light-8);">
+                <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--el-border-color-lighter); padding-bottom: 10px; margin-bottom: 10px;">
+                  <span style="color: var(--el-color-danger); display: flex; align-items: center; gap: 6px;">
+                    当前告警 ({{ visibleAlerts.length }})
+                  </span>
+                  <el-button type="danger" size="small" plain @click="clearAllAlerts">全部清空</el-button>
+                </div>
+                <div>
+                  <el-alert
+                    v-for="alert in visibleAlerts"
+                    :key="alert.id"
+                    :title="alert.message"
+                    :type="alert.level === 'critical' ? 'error' : 'warning'"
+                    show-icon
+                    @close="clearAlert(alert.id)"
+                    style="margin-bottom: 10px;"
                   >
-                    <el-option
-                      v-for="mount in mountOptions"
-                      :key="mount"
-                      :label="mount"
-                      :value="mount"
-                    />
-                  </el-select>
-                  <el-select
-                    v-model="selectedDirKey"
-                    size="small"
-                    placeholder="选择目录"
-                    @change="loadDirectoryHistory"
-                  >
-                    <el-option
-                      v-for="directory in directoryOptions"
-                      :key="directory.key"
-                      :label="`${directory.key} · ${directory.path}`"
-                      :value="directory.key"
-                    />
-                  </el-select>
+                    <template #default>
+                      <div style="font-size: 13px; margin-top: 4px; display: flex; gap: 16px; color: var(--el-text-color-regular);">
+                        <span><strong>来源:</strong> {{ alert.source }}</span>
+                        <span><strong>触发值:</strong> {{ alert.currentValue }} (阈值: {{ alert.threshold }})</span>
+                      </div>
+                    </template>
+                  </el-alert>
                 </div>
               </div>
 
               <div class="metric-strip">
-                <div class="metric-pill">
-                  <label>CPU</label>
-                  <strong>{{ formatPct(selectedServer.system?.cpu?.pct) }}</strong>
-                </div>
-                <div class="metric-pill">
-                  <label>内存</label>
-                  <strong>{{ formatPct(selectedServer.system?.memory?.pct) }}</strong>
-                </div>
-                <div class="metric-pill">
-                  <label>负载/核</label>
-                  <strong>{{ formatFixed(selectedServer.system?.load?.perCore) }}</strong>
-                </div>
-                <div class="metric-pill">
-                  <label>GPU</label>
-                  <strong>{{ formatPct(selectedServer.gpu?.summary?.utilizationPct) }}</strong>
+                <div class="metric-row">
+                  <div class="metric-pill">
+                    <label>平均负载(1/5/15/perCore)</label>
+                    <strong>
+                      {{ formatFixed(selectedServer.system?.load?.one) }} / 
+                      {{ formatFixed(selectedServer.system?.load?.five) }} / 
+                      {{ formatFixed(selectedServer.system?.load?.fifteen) }} /
+                      {{ formatFixed(selectedServer.system?.load?.perCore) }}
+                    </strong>
+                  </div>
+                  <div class="metric-pill">
+                    <label>CPU使用率/温度</label>
+                    <strong>{{ formatPct(selectedServer.system?.cpu?.pct) }}
+                      ({{ selectedServer.system?.cpu?.tempC ? selectedServer.system.cpu.tempC + '°C' : '--' }})
+                    </strong>
+                  </div>
+                  <div class="metric-pill">
+                    <label>内存使用情况</label>
+                    <strong>{{ formatBytes(selectedServer.system?.memory?.usedBytes) }} /
+                      {{ formatBytes(selectedServer.system?.memory?.totalBytes) }}
+                      ({{ formatPct(selectedServer.system?.memory?.pct) }})
+                    </strong>
+                  </div>
                 </div>
               </div>
 
               <div class="chart-grid">
+                <div class="chart-card" v-if="selectedServer?.gpu?.available">
+                  <div class="chart-title">GPU 设备状态</div>
+                  <div class="gpu-list">
+                    <div v-for="device in selectedServer.gpu.devices" :key="device.index" class="gpu-card">
+                      <div class="gpu-card-header">
+                        <strong>GPU {{ device.index }}: {{ device.name }}</strong>
+                        <span class="gpu-temp">{{ device.temperatureC }}°C</span>
+                      </div>
+                      <div class="gpu-metrics">
+                        <div class="gpu-metric">
+                          <label>GPU 使用率</label>
+                          <div class="metric-bar">
+                            <div class="metric-fill" :style="{ width: device.utilizationPct + '%' }"></div>
+                          </div>
+                          <span>{{ device.utilizationPct }}%</span>
+                        </div>
+                        <div class="gpu-metric">
+                          <label>显存使用</label>
+                          <div class="metric-bar">
+                            <div class="metric-fill" :style="{ width: device.memoryPct + '%' }"></div>
+                          </div>
+                          <span>{{ formatBytes(device.memoryUsedMiB * 1024 * 1024) }} / {{ formatBytes(device.memoryTotalMiB * 1024 * 1024) }} ({{ device.memoryPct }}%)</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="chart-card">
                   <div class="chart-title">CPU / 内存 / 负载 / GPU</div>
                   <div id="system-chart" class="chart"></div>
                 </div>
+
                 <div class="chart-card">
                   <div class="chart-title">文件系统使用率</div>
                   <div id="filesystem-chart" class="chart"></div>
                 </div>
+
                 <div class="chart-card">
                   <div class="chart-title">指定目录磁盘占用</div>
                   <div id="directory-chart" class="chart"></div>
                 </div>
+
+                <div class="chart-card">
+                  <div class="table-section">
+                    <div class="chart-title">最近告警事件</div>
+                    <el-table :data="alertRows" height="280">
+                      <el-table-column prop="ts" label="时间" min-width="170"></el-table-column>
+                      <el-table-column prop="level" label="级别" width="90"></el-table-column>
+                      <el-table-column prop="status" label="状态" width="90"></el-table-column>
+                      <el-table-column prop="source" label="来源" min-width="150"></el-table-column>
+                      <el-table-column prop="message" label="消息" min-width="280"></el-table-column>
+                    </el-table>
+                  </div>
+                </div>
               </div>
 
-              <div class="table-section">
-                <div class="chart-title">最近告警事件</div>
-                <el-table :data="alertRows" height="280">
-                  <el-table-column prop="ts" label="时间" min-width="170" />
-                  <el-table-column prop="level" label="级别" width="90" />
-                  <el-table-column prop="status" label="状态" width="90" />
-                  <el-table-column prop="source" label="来源" min-width="150" />
-                  <el-table-column prop="message" label="消息" min-width="280" />
-                </el-table>
-              </div>
+              
             </section>
           </el-col>
         </el-row>

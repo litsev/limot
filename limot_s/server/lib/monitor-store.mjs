@@ -3,10 +3,19 @@ export class MonitorStore {
     this.configStore = configStore;
     this.latest = new Map();
     this.eventStreams = new Set();
+    this.memoryInfo = new Map();
+    this.alertStates = new Map(); // 追踪每个客户端的活跃告警状态
   }
 
   upsertReport(clientId, payload) {
     const current = this.latest.get(clientId) ?? {};
+    const activeAlerts = (payload.currentAlerts ?? []).filter(
+      (alert) => alert.status === "active"
+    );
+    const resolvedAlerts = (payload.currentAlerts ?? []).filter(
+      (alert) => alert.status === "resolved"
+    );
+    
     this.latest.set(clientId, {
       ...current,
       id: clientId,
@@ -15,11 +24,14 @@ export class MonitorStore {
       gpu: payload.gpu ?? current.gpu ?? null,
       filesystems: payload.filesystems ?? current.filesystems ?? [],
       directories: payload.directories ?? current.directories ?? [],
-      currentAlerts: payload.currentAlerts ?? current.currentAlerts ?? [],
+      currentAlerts: activeAlerts,
       runtime: payload.runtime ?? current.runtime ?? null,
       lastError: payload.runtime?.lastError ?? current.lastError ?? null
     });
     this.broadcast("snapshot", this.getServerSummaries());
+    
+    // 返回已解决的告警供caller处理
+    return resolvedAlerts;
   }
 
   upsertHeartbeat(clientId, heartbeat) {
@@ -35,6 +47,18 @@ export class MonitorStore {
       lastError: heartbeat.lastError ?? current.lastError ?? null
     });
     this.broadcast("snapshot", this.getServerSummaries());
+  }
+
+  upsertMemoryInfo(clientId, memoryInfo) {
+    this.memoryInfo.set(clientId, {
+      ...memoryInfo,
+      updatedAt: new Date().toISOString()
+    });
+    this.broadcast("snapshot", this.getServerSummaries());
+  }
+
+  getMemoryInfo(clientId) {
+    return this.memoryInfo.get(clientId) ?? null;
   }
 
   getServerSummaries() {
@@ -57,6 +81,7 @@ export class MonitorStore {
         path: directory.path,
         sizeBytes: null
       }));
+      const memoryInfo = this.getMemoryInfo(client.id);
 
       return {
         id: client.id,
@@ -69,7 +94,8 @@ export class MonitorStore {
         filesystems: latest?.filesystems?.length ? latest.filesystems : configuredFilesystems,
         directories: latest?.directories?.length ? latest.directories : configuredDirectories,
         currentAlerts: latest?.currentAlerts ?? [],
-        runtime: latest?.runtime ?? null
+        runtime: latest?.runtime ?? null,
+        memory: memoryInfo
       };
     });
   }

@@ -1,14 +1,14 @@
 import os from "node:os";
 import { resolve } from "node:path";
 
-import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics } from "./lib/collectors.mjs";
+import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics, startCpuSampler, stopCpuSampler } from "./lib/collectors.mjs";
 import { postJson } from "./lib/http-client.mjs";
 import { enqueueOutbox, flushOutbox, outboxCount } from "./lib/outbox.mjs";
 import { appendLog, readJsonFile, readConfigFile, sleep, writeJsonFile } from "./lib/utils.mjs";
 
 const AGENT_VERSION = "0.1.0";
 const DEFAULT_BOOTSTRAP_PATH = resolve(
-  new URL("../config/bootstrap.yaml", import.meta.url).pathname
+  new URL("../config.yaml", import.meta.url).pathname
 );
 const bootstrapPath = resolve(process.argv[2] ?? DEFAULT_BOOTSTRAP_PATH);
 const bootstrap = await readConfigFile(bootstrapPath);
@@ -31,8 +31,8 @@ let cachedDirectories = [];
 const previousAlertEntries = (await readJsonFile(alertStatePath, [])) ?? [];
 let previousAlerts = new Map(
   previousAlertEntries
-    .filter((entry) => entry?.alertKey)
-    .map((entry) => [entry.alertKey, entry])
+    .filter((entry) => entry?.id)
+    .map((entry) => [entry.id, entry])
 );
 
 const cachedRuntimeConfig =
@@ -63,29 +63,26 @@ async function agentRequest(route, payload) {
 }
 
 function diffAlertEvents(currentAlerts) {
-  const currentMap = new Map(currentAlerts.map((alert) => [alert.alertKey, alert]));
-  const events = [];
+  const currentMap = new Map(currentAlerts.map((alert) => [alert.id, alert]));
+  const allAlerts = [];
 
-  for (const [alertKey, alert] of currentMap.entries()) {
-    if (!previousAlerts.has(alertKey)) {
-      events.push({
-        ...alert,
-        status: "open"
-      });
-    }
+  // 新增或仍活跃的告警
+  for (const alert of currentAlerts) {
+    allAlerts.push(alert);
   }
 
-  for (const [alertKey, alert] of previousAlerts.entries()) {
-    if (!currentMap.has(alertKey)) {
-      events.push({
-        ...alert,
+  // 已解决的告警（之前存在，现在不存在）
+  for (const [alertId, previousAlert] of previousAlerts.entries()) {
+    if (!currentMap.has(alertId)) {
+      allAlerts.push({
+        ...previousAlert,
         status: "resolved"
       });
     }
   }
 
   previousAlerts = currentMap;
-  return events;
+  return allAlerts;
 }
 
 async function persistAlertState() {
@@ -96,7 +93,11 @@ async function syncRuntimeConfig() {
   const response = await agentRequest("/api/agent/config", {
     requestedAt: new Date().toISOString(),
     agentVersion: AGENT_VERSION,
-    hostname: os.hostname()
+    hostname: os.hostname(),
+    memory: {
+      totalBytes: os.totalmem(),
+      collectedAt: new Date().toISOString()
+    }
   });
 
   if (response.config) {
@@ -145,13 +146,13 @@ async function buildReportPayload() {
   };
 
   const currentAlerts = buildCurrentAlerts(report, config);
-  const alertEvents = diffAlertEvents(currentAlerts);
+  const allAlerts = diffAlertEvents(currentAlerts);
   await persistAlertState();
 
   return {
     ...report,
-    currentAlerts,
-    alertEvents
+    currentAlerts: allAlerts,
+    alertEvents: allAlerts
   };
 }
 
@@ -230,6 +231,9 @@ async function configLoop() {
 await log(`agent starting, bootstrap=${bootstrapPath}`);
 await log(`server=${bootstrap.serverBaseUrl} clientId=${bootstrap.clientId}`);
 
+startCpuSampler();
+await log("CPU sampler started");
+
 try {
   await syncRuntimeConfig();
   await log("initial config sync succeeded");
@@ -238,4 +242,9 @@ try {
   await log(`initial config sync failed: ${error.message}`);
 }
 
-await Promise.all([configLoop(), reportLoop(), heartbeatLoop()]);
+try {
+  await Promise.all([configLoop(), reportLoop(), heartbeatLoop()]);
+} finally {
+  stopCpuSampler();
+  await log("CPU sampler stopped");
+}

@@ -11,6 +11,7 @@ const SYSTEM_HEADERS = [
   "uptime_sec",
   "cpu_cores",
   "cpu_pct",
+  "cpu_temp_c",
   "mem_used_bytes",
   "mem_total_bytes",
   "mem_pct",
@@ -30,6 +31,17 @@ const FILESYSTEM_HEADERS = [
   "total_bytes",
   "used_bytes",
   "used_pct"
+];
+
+const GPU_DEVICE_HEADERS = [
+  "ts",
+  "gpu_index",
+  "gpu_name",
+  "utilization_pct",
+  "memory_used_mib",
+  "memory_total_mib",
+  "memory_pct",
+  "temperature_c"
 ];
 
 const DIRECTORY_HEADERS = ["ts", "dir_key", "dir_path", "size_bytes"];
@@ -146,57 +158,97 @@ export class CsvStore {
     );
     await mkdir(yearDir, { recursive: true });
 
-    await this.appendRow(resolve(yearDir, "system.csv"), SYSTEM_HEADERS, {
-      ts: collectedAt,
-      hostname: report.system?.hostname,
-      platform: report.system?.platform,
-      release: report.system?.release,
-      arch: report.system?.arch,
-      uptime_sec: report.system?.uptimeSec,
-      cpu_cores: report.system?.cpu?.cores,
-      cpu_pct: report.system?.cpu?.pct,
-      mem_used_bytes: report.system?.memory?.usedBytes,
-      mem_total_bytes: report.system?.memory?.totalBytes,
-      mem_pct: report.system?.memory?.pct,
-      load1: report.system?.load?.one,
-      load5: report.system?.load?.five,
-      load15: report.system?.load?.fifteen,
-      load_per_core: report.system?.load?.perCore,
-      gpu_pct: report.gpu?.summary?.utilizationPct,
-      gpu_mem_pct: report.gpu?.summary?.memoryPct
-    });
+    const writes = [];
 
+    // 系统指标
+    writes.push(
+      this.appendRow(resolve(yearDir, "system.csv"), SYSTEM_HEADERS, {
+        ts: collectedAt,
+        hostname: report.system?.hostname,
+        platform: report.system?.platform,
+        release: report.system?.release,
+        arch: report.system?.arch,
+        uptime_sec: report.system?.uptimeSec,
+        cpu_cores: report.system?.cpu?.cores,
+        cpu_pct: report.system?.cpu?.pct,
+        cpu_temp_c: report.system?.cpu?.tempC,
+        mem_used_bytes: report.system?.memory?.usedBytes,
+        mem_total_bytes: report.system?.memory?.totalBytes,
+        mem_pct: report.system?.memory?.pct,
+        load1: report.system?.load?.one,
+        load5: report.system?.load?.five,
+        load15: report.system?.load?.fifteen,
+        load_per_core: report.system?.load?.perCore,
+        gpu_pct: report.gpu?.summary?.utilizationPct,
+        gpu_mem_pct: report.gpu?.summary?.memoryPct
+      })
+    );
+
+    // 文件系统数据
     for (const filesystem of report.filesystems ?? []) {
-      await this.appendRow(resolve(yearDir, "filesystem.csv"), FILESYSTEM_HEADERS, {
-        ts: collectedAt,
-        filesystem: filesystem.filesystem,
-        fs_type: filesystem.fsType,
-        mount: filesystem.mount,
-        total_bytes: filesystem.totalBytes,
-        used_bytes: filesystem.usedBytes,
-        used_pct: filesystem.usedPct
-      });
+      writes.push(
+        this.appendRow(resolve(yearDir, "filesystem.csv"), FILESYSTEM_HEADERS, {
+          ts: collectedAt,
+          filesystem: filesystem.filesystem,
+          fs_type: filesystem.fsType,
+          mount: filesystem.mount,
+          total_bytes: filesystem.totalBytes,
+          used_bytes: filesystem.usedBytes,
+          used_pct: filesystem.usedPct
+        })
+      );
     }
 
+    // GPU设备数据
+    for (const device of report.gpu?.devices ?? []) {
+      writes.push(
+        this.appendRow(resolve(yearDir, "gpu.csv"), GPU_DEVICE_HEADERS, {
+          ts: collectedAt,
+          gpu_index: device.index,
+          gpu_name: device.name,
+          utilization_pct: device.utilizationPct,
+          memory_used_mib: device.memoryUsedMiB,
+          memory_total_mib: device.memoryTotalMiB,
+          memory_pct: device.memoryPct,
+          temperature_c: device.temperatureC
+        })
+      );
+    }
+
+    // 目录数据
     for (const directory of report.directories ?? []) {
-      await this.appendRow(resolve(yearDir, "directory.csv"), DIRECTORY_HEADERS, {
-        ts: collectedAt,
-        dir_key: directory.key,
-        dir_path: directory.path,
-        size_bytes: directory.sizeBytes
-      });
+      writes.push(
+        this.appendRow(resolve(yearDir, "directory.csv"), DIRECTORY_HEADERS, {
+          ts: collectedAt,
+          dir_key: directory.key,
+          dir_path: directory.path,
+          size_bytes: directory.sizeBytes
+        })
+      );
     }
 
-    for (const event of report.alertEvents ?? []) {
+    // 并行执行所有写入操作
+    await Promise.all(writes);
+  }
+
+  async appendResolvedAlerts(clientId, collectedAt, resolvedAlerts) {
+    const yearDir = resolve(
+      this.rootDir,
+      String(new Date(collectedAt).getUTCFullYear()),
+      clientId
+    );
+    await mkdir(yearDir, { recursive: true });
+
+    for (const alert of resolvedAlerts) {
       await this.appendRow(resolve(yearDir, "alerts.csv"), ALERT_HEADERS, {
         ts: collectedAt,
-        alert_key: event.alertKey,
-        source: event.source,
-        level: event.level,
-        status: event.status,
-        current_value: event.currentValue,
-        threshold: event.threshold,
-        message: event.message
+        alert_key: alert.id,
+        source: alert.source,
+        level: alert.level,
+        status: alert.status,
+        current_value: alert.currentValue,
+        threshold: alert.threshold,
+        message: alert.message
       });
     }
   }
@@ -244,6 +296,7 @@ export class CsvStore {
       rows.map((row) => ({
         ts: row.ts,
         cpuPct: toNumber(row.cpu_pct),
+        cpuTempC: toNumber(row.cpu_temp_c),
         memPct: toNumber(row.mem_pct),
         load1: toNumber(row.load1),
         load5: toNumber(row.load5),
@@ -258,9 +311,13 @@ export class CsvStore {
 
   async queryFilesystemHistory(clientId, { from, to, mount, points }) {
     const rows = await this.readRows(clientId, "filesystem.csv", from, to);
+    const uniqueTs = Array.from(new Set(rows.map((r) => r.ts))).sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+    const sampledTs = new Set(downsample(uniqueTs, points));
+    
     const filtered = mount ? rows.filter((row) => row.mount === mount) : rows;
-    return downsample(
-      filtered.map((row) => ({
+    return filtered
+      .filter((row) => sampledTs.has(row.ts))
+      .map((row) => ({
         ts: row.ts,
         filesystem: row.filesystem,
         fsType: row.fs_type,
@@ -268,23 +325,23 @@ export class CsvStore {
         totalBytes: toNumber(row.total_bytes),
         usedBytes: toNumber(row.used_bytes),
         usedPct: toNumber(row.used_pct)
-      })),
-      points
-    );
+      }));
   }
 
   async queryDirectoryHistory(clientId, { from, to, dirKey, points }) {
     const rows = await this.readRows(clientId, "directory.csv", from, to);
+    const uniqueTs = Array.from(new Set(rows.map((r) => r.ts))).sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+    const sampledTs = new Set(downsample(uniqueTs, points));
+    
     const filtered = dirKey ? rows.filter((row) => row.dir_key === dirKey) : rows;
-    return downsample(
-      filtered.map((row) => ({
+    return filtered
+      .filter((row) => sampledTs.has(row.ts))
+      .map((row) => ({
         ts: row.ts,
         dirKey: row.dir_key,
         path: row.dir_path,
         sizeBytes: toNumber(row.size_bytes)
-      })),
-      points
-    );
+      }));
   }
 
   async queryAlerts(clientId, { from, to, limit = 200 }) {

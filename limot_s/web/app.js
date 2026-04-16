@@ -10,7 +10,7 @@ function formatBytes(value) {
     return "--";
   }
 
-  const units = ["B", "KB", "MB", "GB", "TB"];
+  const units = ["B", "KB", "MB", "GB"];
   let number = Number(value);
   let index = 0;
   while (number >= 1024 && index < units.length - 1) {
@@ -51,10 +51,9 @@ createApp({
     const servers = ref([]);
     const publicConfig = reactive({});
     const selectedServerId = ref("");
-    const selectedMount = ref("");
-    const selectedDirKey = ref("");
     const hoursRange = ref(24);
     const alertRows = ref([]);
+    const hiddenAlertKeys = ref(new Set());
 
     const history = reactive({
       system: [],
@@ -62,19 +61,37 @@ createApp({
       directory: []
     });
 
-    const mountOptions = computed(() => {
-      const server = selectedServer.value;
-      return (server?.filesystems ?? []).map((item) => item.mount);
-    });
-
-    const directoryOptions = computed(() => {
-      const server = selectedServer.value;
-      return server?.directories ?? [];
-    });
-
     const selectedServer = computed(() =>
       servers.value.find((server) => server.id === selectedServerId.value) ?? null
     );
+
+    const visibleAlerts = computed(() => {
+      if (!selectedServer.value || !selectedServer.value.currentAlerts) {
+        return [];
+      }
+      // 只显示状态为"active"的告警，并过滤掉用户已手动清空的告警
+      return selectedServer.value.currentAlerts.filter(
+        (alert) =>
+          alert.status !== "resolved" &&
+          !hiddenAlertKeys.value.has(`${selectedServer.value.id}::${alert.id}`)
+      );
+    });
+
+    function clearAlert(alertId) {
+      if (!selectedServerId.value) return;
+      const nextSet = new Set(hiddenAlertKeys.value);
+      nextSet.add(`${selectedServerId.value}::${alertId}`);
+      hiddenAlertKeys.value = nextSet;
+    }
+
+    function clearAllAlerts() {
+      if (!selectedServer.value || !selectedServer.value.currentAlerts) return;
+      const nextSet = new Set(hiddenAlertKeys.value);
+      for (const alert of selectedServer.value.currentAlerts) {
+        nextSet.add(`${selectedServerId.value}::${alert.id}`);
+      }
+      hiddenAlertKeys.value = nextSet;
+    }
 
     let systemChart = null;
     let filesystemChart = null;
@@ -159,7 +176,7 @@ createApp({
     }
 
     async function loadFilesystemHistory() {
-      if (!selectedServerId.value || !selectedMount.value) {
+      if (!selectedServerId.value) {
         history.filesystem = [];
         renderFilesystemChart();
         return;
@@ -170,8 +187,7 @@ createApp({
       const params = new URLSearchParams({
         from: from.toISOString(),
         to: to.toISOString(),
-        points: "420",
-        mount: selectedMount.value
+        points: "420"
       });
 
       const payload = await fetchJson(
@@ -182,7 +198,7 @@ createApp({
     }
 
     async function loadDirectoryHistory() {
-      if (!selectedServerId.value || !selectedDirKey.value) {
+      if (!selectedServerId.value) {
         history.directory = [];
         renderDirectoryChart();
         return;
@@ -193,8 +209,7 @@ createApp({
       const params = new URLSearchParams({
         from: from.toISOString(),
         to: to.toISOString(),
-        points: "420",
-        dirKey: selectedDirKey.value
+        points: "420"
       });
 
       const payload = await fetchJson(
@@ -213,14 +228,6 @@ createApp({
       const index = servers.value.findIndex((server) => server.id === selectedServerId.value);
       if (index >= 0) {
         servers.value[index] = details;
-      }
-
-      if (!selectedMount.value && details.filesystems?.[0]?.mount) {
-        selectedMount.value = details.filesystems[0].mount;
-      }
-
-      if (!selectedDirKey.value && details.directories?.[0]?.key) {
-        selectedDirKey.value = details.directories[0].key;
       }
 
       await Promise.all([
@@ -289,23 +296,72 @@ createApp({
         return;
       }
 
-      const xAxis = history.filesystem.map((row) => formatDateTime(row.ts));
-      filesystemChart.setOption(
-        baseChartOption("文件系统", xAxis, [
-          {
-            name: "使用率 %",
-            type: "line",
-            smooth: true,
-            data: history.filesystem.map((row) => row.usedPct)
-          }
-        ], [
-          {
-            type: "value",
-            min: 0,
-            max: 100
-          }
-        ])
-      );
+      const mounts = [...new Set(history.filesystem.map((r) => r.mount))];
+      const tsSet = [...new Set(history.filesystem.map((r) => r.ts))].sort();
+      const xAxis = tsSet.map((ts) => formatDateTime(ts));
+
+      // 构建查询表，用于 tooltip 中快速查找
+      const filesystemDataMap = new Map();
+      history.filesystem.forEach((r) => {
+        const key = `${r.ts}::${r.mount}`;
+        filesystemDataMap.set(key, r);
+      });
+
+      const series = mounts.map((mount) => {
+        const mountDataMap = new Map();
+        history.filesystem
+          .filter((r) => r.mount === mount)
+          .forEach((r) => {
+            mountDataMap.set(r.ts, r.usedPct);
+          });
+        return {
+          name: mount,
+          type: "line",
+          smooth: true,
+          connectNulls: true,
+          data: tsSet.map((ts) => mountDataMap.get(ts) ?? null)
+        };
+      });
+
+      const chartOption = baseChartOption("文件系统", xAxis, series, [
+        {
+          type: "value",
+          min: 0,
+          max: 100
+        }
+      ]);
+
+      chartOption.tooltip = {
+        trigger: "axis",
+        formatter: (params) => {
+          if (!params || params.length === 0) return '';
+          const ts = params[0].axisValue;
+          // 从 xAxis 的格式化时间反查原始 ts
+          const tsIndex = xAxis.indexOf(ts);
+          if (tsIndex === -1) return '';
+          const originalTs = tsSet[tsIndex];
+          
+          let result = `<div style="margin-bottom: 8px;">${ts}</div>`;
+          params.forEach((param) => {
+            const mount = param.seriesName;
+            const key = `${originalTs}::${mount}`;
+            const data = filesystemDataMap.get(key);
+            
+            if (data) {
+              result += `<div style="color: ${param.color}; margin-bottom: 4px;">
+                ${mount}: ${data.usedPct.toFixed(1)}% (${formatBytes(data.usedBytes)}/${formatBytes(data.totalBytes)})
+              </div>`;
+            } else {
+              result += `<div style="color: ${param.color}; margin-bottom: 4px;">
+                ${mount}: --
+              </div>`;
+            }
+          });
+          return result;
+        }
+      };
+
+      filesystemChart.setOption(chartOption);
     }
 
     function renderDirectoryChart() {
@@ -316,23 +372,36 @@ createApp({
         return;
       }
 
-      const xAxis = history.directory.map((row) => formatDateTime(row.ts));
-      directoryChart.setOption(
-        baseChartOption("目录容量", xAxis, [
-          {
-            name: "目录大小",
-            type: "line",
-            smooth: true,
-            data: history.directory.map((row) => row.sizeBytes),
-            tooltip: {
-              valueFormatter: (value) => formatBytes(value)
-            }
+      const dirKeys = [...new Set(history.directory.map((r) => r.dirKey))];
+      const tsSet = [...new Set(history.directory.map((r) => r.ts))].sort();
+      const xAxis = tsSet.map((ts) => formatDateTime(ts));
+
+      const series = dirKeys.map((dirKey) => {
+        const dataMap = new Map();
+        history.directory
+          .filter((r) => r.dirKey === dirKey)
+          .forEach((r) => {
+            const sizeGb = Number((r.sizeBytes / 1024 / 1024 / 1024).toFixed(3));
+            dataMap.set(r.ts, sizeGb);
+          });
+        return {
+          name: dirKey,
+          type: "line",
+          smooth: true,
+          connectNulls: true,
+          data: tsSet.map((ts) => dataMap.get(ts) ?? null),
+          tooltip: {
+            valueFormatter: (value) => value !== null ? `${value} GB` : '--'
           }
-        ], [
+        };
+      });
+
+      directoryChart.setOption(
+        baseChartOption("目录容量", xAxis, series, [
           {
             type: "value",
             axisLabel: {
-              formatter: (value) => formatBytes(value)
+              formatter: '{value} GB'
             }
           }
         ])
@@ -363,8 +432,6 @@ createApp({
     }
 
     watch(selectedServerId, async () => {
-      selectedMount.value = "";
-      selectedDirKey.value = "";
       await nextTick();
       await refreshSelectedServer();
     });
@@ -389,23 +456,23 @@ createApp({
 
     return {
       alertRows,
-      directoryOptions,
+      clearAlert,
+      clearAllAlerts,
+      formatBytes,
       formatDateTime,
       formatFixed,
       formatPct,
       hoursRange,
       loadDirectoryHistory,
       loadFilesystemHistory,
-      mountOptions,
       publicConfig,
       reloadConfig,
       refreshSelectedServer,
       selectServer,
-      selectedDirKey,
-      selectedMount,
       selectedServer,
       selectedServerId,
-      servers
+      servers,
+      visibleAlerts
     };
   }
 }).use(ElementPlus).mount("#app");

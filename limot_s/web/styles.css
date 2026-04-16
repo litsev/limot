@@ -175,7 +175,7 @@ body {
 
 .server-card-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -189,6 +189,7 @@ body {
 
 .server-card-grid span {
   font-weight: 700;
+  font-size: 18px;
 }
 
 .status-dot {
@@ -219,10 +220,16 @@ body {
 }
 
 .metric-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   margin-bottom: 16px;
+}
+
+.metric-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .metric-pill {
@@ -246,6 +253,76 @@ body {
   font-weight: 700;
 }
 
+.gpu-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.gpu-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(249, 251, 248, 0.5));
+  padding: 14px;
+  transition: all 0.2s ease;
+}
+
+.gpu-card:hover {
+  border-color: rgba(13, 122, 112, 0.2);
+  box-shadow: 0 8px 20px rgba(13, 122, 112, 0.08);
+}
+
+.gpu-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.gpu-card-header strong {
+  font-size: 14px;
+}
+
+.gpu-temp {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.gpu-metrics {
+  display: grid;
+  gap: 10px;
+}
+
+.gpu-metric {
+  display: grid;
+  gap: 6px;
+}
+
+.gpu-metric label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metric-bar {
+  width: 100%;
+  height: 8px;
+  background: rgba(24, 32, 39, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.metric-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-soft));
+  transition: width 0.3s ease;
+}
+
+.gpu-metric span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .chart {
   width: 100%;
   height: 280px;
@@ -260,8 +337,15 @@ body {
     flex-direction: column;
   }
 
-  .hero-side,
-  .metric-strip {
+  .hero-side {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metric-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gpu-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -271,8 +355,15 @@ body {
     padding: 18px 14px 28px;
   }
 
-  .hero-side,
-  .metric-strip {
+  .hero-side {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-row {
+    grid-template-columns: 1fr;
+  }
+
+  .gpu-list {
     grid-template-columns: 1fr;
   }
 

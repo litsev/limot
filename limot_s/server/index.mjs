@@ -16,7 +16,7 @@ import { MonitorStore } from "./lib/monitor-store.mjs";
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB_ROOT = resolve(PROJECT_ROOT, "web");
 const DATA_ROOT = resolve(PROJECT_ROOT, "data");
-const CONFIG_PATH = resolve(PROJECT_ROOT, "config", "monitoring.yaml");
+const CONFIG_PATH = resolve(PROJECT_ROOT, "config.yaml");
 
 const configStore = new ConfigStore(CONFIG_PATH);
 await configStore.load("startup");
@@ -179,17 +179,28 @@ async function requestHandler(req, res) {
   }
 
   if (req.method === "POST" && pathname === "/api/agent/config") {
-    await handleAgentRequest(req, res, async ({ clientId }) => ({
-      configVersion: configStore.version,
-      config: configStore.getAgentRuntimeConfig(clientId)
-    }));
+    await handleAgentRequest(req, res, async ({ clientId, payload }) => {
+      // 更新客户端内存信息
+      if (payload.memory) {
+        monitorStore.upsertMemoryInfo(clientId, payload.memory);
+      }
+      return {
+        configVersion: configStore.version,
+        config: configStore.getAgentRuntimeConfig(clientId)
+      };
+    });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/agent/report") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
+      const resolvedAlerts = monitorStore.upsertReport(clientId, payload);
+      // 先记录系统指标和活跃告警
       await csvStore.appendReport(clientId, payload);
-      monitorStore.upsertReport(clientId, payload);
+      // 再记录已解决的历史告警
+      if (resolvedAlerts.length > 0) {
+        await csvStore.appendResolvedAlerts(clientId, payload.collectedAt, resolvedAlerts);
+      }
       return {
         acceptedAt: new Date().toISOString()
       };
