@@ -171,7 +171,8 @@ async function directoryLoop() {
     }
 
     const elapsed = Date.now() - startedAt;
-    const waitMs = Math.max((config.directoryScanIntervalSec ?? 180) * 1000 - elapsed, 1000);
+    // 基础loop每秒运行一次，以便更细粒度地判断各目录自身的scanIntervalSec
+    const waitMs = Math.max(1000 - elapsed, 100);
     await sleep(waitMs);
   }
 }

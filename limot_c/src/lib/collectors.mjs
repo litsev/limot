@@ -1,7 +1,8 @@
 import os from "node:os";
+import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 import { sleep } from "./utils.mjs";
 
@@ -175,37 +176,114 @@ export async function collectFilesystemMetrics(runtimeConfig) {
     .filter((entry) => includeMounts.length === 0 || includeMounts.includes(entry.mount));
 }
 
+const directoryCache = new Map();
+
 export async function collectDirectoryMetrics(runtimeConfig) {
-  const directories = runtimeConfig.directories ?? [];
+  const directoriesConfig = Array.isArray(runtimeConfig.directories) ? runtimeConfig.directories : [];
+  const globalScanIntervalSec = runtimeConfig.directoryScanIntervalSec || 180;
   const results = [];
 
-  for (const directory of directories) {
+  const targetDirs = [];
+
+  for (const rule of directoriesConfig) {
+    if (!rule.path) continue;
+    const scanPath = rule.path;
+    const excludePaths = Array.isArray(rule.exclude) ? rule.exclude : [];
+    
     try {
-      const { stdout } = await execFileAsync("du", ["-sk", directory.path], {
-        timeout: 300_000
+      const entries = await readdir(scanPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          // excludePaths支持常见的通配符形式，比如 * 或 ?
+          const isExcluded = excludePaths.some(pattern => {
+            if (pattern.includes("*") || pattern.includes("?")) {
+              const regexBody = pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape regex特殊字符
+                .replace(/\*/g, '.*')
+                .replace(/\?/g, '.');
+              const regex = new RegExp(`^${regexBody}$`);
+              return regex.test(entry.name);
+            }
+            return pattern === entry.name;
+          });
+
+          if (!isExcluded) {
+            const dirPath = path.join(scanPath, entry.name);
+            targetDirs.push({ 
+              dirPath, 
+              owner: entry.name, 
+              ruleWarnGB: rule.warnGB,
+              timeoutSec: rule.timeoutSec || 300,
+              scanIntervalSec: rule.scanIntervalSec || globalScanIntervalSec
+            });
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  const now = Date.now();
+
+  // 清理不再配置中的缓存
+  const currentDirPaths = new Set(targetDirs.map(t => t.dirPath));
+  for (const key of directoryCache.keys()) {
+    if (!currentDirPaths.has(key)) {
+      directoryCache.delete(key);
+    }
+  }
+
+  for (const target of targetDirs) {
+    const { dirPath, owner, ruleWarnGB, timeoutSec, scanIntervalSec } = target;
+    
+    const cached = directoryCache.get(dirPath);
+    if (cached && now - cached.lastScannedAt < scanIntervalSec * 1000) {
+      // 未到点时，因为之前生成过了并且在服务端已经落地记录，
+      // 所以我们直接跳过，不放入results，从而避免往服务端发重复数据。
+      continue;
+    }
+
+    try {
+      const { stdout } = await execFileAsync("du", ["-sk", dirPath], {
+        timeout: timeoutSec * 1000
       });
       const [kilobytes] = stdout.trim().split(/\s+/);
+      const sizeBytes = Number(kilobytes) * 1024;
+      
+      // 更新缓存并存入当次真正扫描后得出的最新值
+      directoryCache.set(dirPath, { lastScannedAt: now, sizeBytes });
+      
       results.push({
-        key: directory.key,
-        path: directory.path,
-        sizeBytes: Number(kilobytes) * 1024
+        key: dirPath,
+        path: dirPath,
+        owner: owner,
+        warnGB: ruleWarnGB,
+        sizeBytes
       });
     } catch (error) {
       const stdout = error?.stdout ?? "";
       const [kilobytes] = String(stdout).trim().split(/\s+/);
       const parsedKilobytes = Number(kilobytes);
       if (Number.isFinite(parsedKilobytes) && parsedKilobytes >= 0) {
+        const sizeBytes = parsedKilobytes * 1024;
+        directoryCache.set(dirPath, { lastScannedAt: now, sizeBytes });
         results.push({
-          key: directory.key,
-          path: directory.path,
-          sizeBytes: parsedKilobytes * 1024
+          key: dirPath,
+          path: dirPath,
+          owner: owner,
+          warnGB: ruleWarnGB,
+          sizeBytes
         });
         continue;
       }
 
+      directoryCache.set(dirPath, { lastScannedAt: now, sizeBytes: null });
       results.push({
-        key: directory.key,
-        path: directory.path,
+        key: dirPath,
+        path: dirPath,
+        owner: owner,
+        warnGB: ruleWarnGB,
         sizeBytes: null
       });
     }
@@ -335,24 +413,25 @@ export function buildCurrentAlerts(report, runtimeConfig) {
     }
   }
 
-  const directoryRules = new Map(
-    (runtimeConfig.directories ?? []).map((directory) => [directory.key, directory])
-  );
   for (const directory of report.directories || []) {
-    const rule = directoryRules.get(directory.key);
-    if (!rule || !rule.warnGB || directory.sizeBytes === null) {
+    if (directory.sizeBytes === null) {
       continue;
     }
+    
+    // 如果没有指定的warnGB阈值，则跳过或者是用默认，由于配置自带规则里的warnGB已经注入
+    const warnGB = directory.warnGB;
+    if (!warnGB) continue;
+
     const currentGb = directory.sizeBytes / (1024 ** 3);
-    if (currentGb >= rule.warnGB) {
+    if (currentGb >= warnGB) {
       alerts.push({
         id: `directory:${directory.key}`,
         alertKey: `directory:${directory.key}`,
         source: `directory:${directory.path}`,
         status: "active",
-        level: chooseAlertLevel(currentGb, rule.warnGB),
+        level: chooseAlertLevel(currentGb, warnGB),
         currentValue: Number(currentGb.toFixed(2)),
-        threshold: rule.warnGB,
+        threshold: warnGB,
         message: `目录 ${directory.path} 占用达到 ${currentGb.toFixed(2)} GB`,
         detectedAt: report.collectedAt
       });

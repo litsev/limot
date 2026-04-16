@@ -44,7 +44,7 @@ const GPU_DEVICE_HEADERS = [
   "temperature_c"
 ];
 
-const DIRECTORY_HEADERS = ["ts", "dir_key", "dir_path", "size_bytes"];
+const DIRECTORY_HEADERS = ["ts", "dir_key", "dir_path", "owner", "size_bytes"];
 
 const ALERT_HEADERS = [
   "ts",
@@ -167,6 +167,7 @@ export class CsvStore {
           ts: collectedAt,
           dir_key: directory.key,
           dir_path: directory.path,
+          owner: directory.owner,
           size_bytes: directory.sizeBytes
         })
       );
@@ -249,6 +250,7 @@ export class CsvStore {
             ts: collectedAt,
             dir_key: directory.key,
             dir_path: directory.path,
+            owner: directory.owner,
             size_bytes: directory.sizeBytes
           })
         );
@@ -282,9 +284,21 @@ export class CsvStore {
   }
 
   async appendRow(filePath, headers, values) {
-    const exists = await this.fileExists(filePath);
-    if (!exists) {
-      await appendFile(filePath, `${headers.join(",")}\n`, "utf8");
+    if (!this.initializingFiles) {
+      this.initializingFiles = new Map();
+    }
+    
+    if (this.initializingFiles.has(filePath)) {
+      await this.initializingFiles.get(filePath);
+    } else {
+      const initPromise = (async () => {
+        const exists = await this.fileExists(filePath);
+        if (!exists) {
+          await appendFile(filePath, `${headers.join(",")}\n`, "utf8");
+        }
+      })();
+      this.initializingFiles.set(filePath, initPromise);
+      await initPromise;
     }
 
     await appendFile(filePath, toCsvRow(headers, values), "utf8");

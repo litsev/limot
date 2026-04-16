@@ -90,9 +90,9 @@ export class ConfigStore {
     if (merged.clients) {
       for (const client of merged.clients) {
         if (client.directories && Array.isArray(client.directories)) {
-          for (const dir of client.directories) {
-            if (dir.warnGB === undefined) {
-              dir.warnGB = defaultWarnGB;
+          for (const rule of client.directories) {
+            if (rule.warnGB === undefined) {
+              rule.warnGB = defaultWarnGB;
             }
           }
         }

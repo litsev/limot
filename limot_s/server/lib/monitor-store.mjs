@@ -16,6 +16,13 @@ export class MonitorStore {
       (alert) => alert.status === "resolved"
     );
     
+    // 合并目录状态：保留未被本次上报覆盖的历史目录最新数据
+    const mergedDirectoriesMap = new Map((current.directories ?? []).map(d => [d.key, d]));
+    for (const d of (payload.directories ?? [])) {
+      mergedDirectoriesMap.set(d.key, d);
+    }
+    const mergedDirectories = Array.from(mergedDirectoriesMap.values());
+
     this.latest.set(clientId, {
       ...current,
       id: clientId,
@@ -23,7 +30,7 @@ export class MonitorStore {
       system: payload.system ?? current.system ?? null,
       gpu: payload.gpu ?? current.gpu ?? null,
       filesystems: payload.filesystems ?? current.filesystems ?? [],
-      directories: payload.directories ?? current.directories ?? [],
+      directories: mergedDirectories,
       currentAlerts: activeAlerts,
       runtime: payload.runtime ?? current.runtime ?? null,
       lastError: payload.runtime?.lastError ?? current.lastError ?? null
@@ -76,11 +83,6 @@ export class MonitorStore {
       const configuredFilesystems = (client.filesystems?.includeMounts ?? []).map((mount) => ({
         mount
       }));
-      const configuredDirectories = (client.directories ?? []).map((directory) => ({
-        key: directory.key,
-        path: directory.path,
-        sizeBytes: null
-      }));
       const memoryInfo = this.getMemoryInfo(client.id);
 
       return {
@@ -92,7 +94,7 @@ export class MonitorStore {
         system: latest?.system ?? null,
         gpu: latest?.gpu ?? null,
         filesystems: latest?.filesystems?.length ? latest.filesystems : configuredFilesystems,
-        directories: latest?.directories?.length ? latest.directories : configuredDirectories,
+        directories: latest?.directories ?? [],
         currentAlerts: latest?.currentAlerts ?? [],
         runtime: latest?.runtime ?? null,
         memory: memoryInfo
