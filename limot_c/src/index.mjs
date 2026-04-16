@@ -26,8 +26,6 @@ const logPath = resolve(logsDir, "agent.log");
 
 let stopping = false;
 let lastError = null;
-let lastDirectoryScanAt = 0;
-let cachedDirectories = [];
 const previousAlertEntries = (await readJsonFile(alertStatePath, [])) ?? [];
 let previousAlerts = new Map(
   previousAlertEntries
@@ -101,14 +99,7 @@ async function syncRuntimeConfig() {
   });
 
   if (response.config) {
-    const previousConfig = runtimeConfig;
     runtimeConfig = response.config;
-    const previousDirectoryConfig = JSON.stringify(previousConfig?.directories ?? []);
-    const nextDirectoryConfig = JSON.stringify(response.config.directories ?? []);
-    if (previousDirectoryConfig !== nextDirectoryConfig) {
-      lastDirectoryScanAt = 0;
-      cachedDirectories = [];
-    }
     await writeJsonFile(runtimeConfigCachePath, response.config);
   }
 }
@@ -120,14 +111,6 @@ async function buildReportPayload() {
     collectGpuMetrics(),
     collectFilesystemMetrics(config)
   ]);
-
-  if (
-    Date.now() - lastDirectoryScanAt >=
-    (config.directoryScanIntervalSec ?? 180) * 1000
-  ) {
-    cachedDirectories = await collectDirectoryMetrics(config);
-    lastDirectoryScanAt = Date.now();
-  }
 
   const report = {
     collectedAt: new Date().toISOString(),
@@ -142,7 +125,6 @@ async function buildReportPayload() {
     system,
     gpu,
     filesystems,
-    directories: cachedDirectories
   };
 
   const currentAlerts = buildCurrentAlerts(report, config);
@@ -158,6 +140,40 @@ async function buildReportPayload() {
 
 async function sendReportPayload(payload) {
   await agentRequest("/api/agent/report", payload);
+}
+
+async function directoryLoop() {
+  while (!stopping) {
+    const startedAt = Date.now();
+    const config = getRuntimeConfig();
+
+    try {
+      const directories = await collectDirectoryMetrics(config);
+      const directoryAlerts = buildCurrentAlerts({ directories }, config);
+      const report = {
+        collectedAt: new Date().toISOString(),
+        directories
+      };
+      
+      const reportAlerts = diffAlertEvents(directoryAlerts);
+      await persistAlertState();
+      
+      const payload = {
+        ...report,
+        currentAlerts: reportAlerts,
+        alertEvents: reportAlerts
+      };
+      
+      await agentRequest("/api/agent/report_directory", payload);
+    } catch (error) {
+      lastError = error.message;
+      await log(`directory report failed: ${error.message}`);
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const waitMs = Math.max((config.directoryScanIntervalSec ?? 180) * 1000 - elapsed, 1000);
+    await sleep(waitMs);
+  }
 }
 
 async function reportLoop() {
@@ -243,7 +259,7 @@ try {
 }
 
 try {
-  await Promise.all([configLoop(), reportLoop(), heartbeatLoop()]);
+  await Promise.all([configLoop(), reportLoop(), directoryLoop(), heartbeatLoop()]);
 } finally {
   stopCpuSampler();
   await log("CPU sampler stopped");

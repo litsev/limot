@@ -285,7 +285,7 @@ createApp({
             min: 0
           }
         ])
-      );
+      , true);
     }
 
     function renderFilesystemChart() {
@@ -361,7 +361,7 @@ createApp({
         }
       };
 
-      filesystemChart.setOption(chartOption);
+      filesystemChart.setOption(chartOption, true);
     }
 
     function renderDirectoryChart() {
@@ -405,7 +405,7 @@ createApp({
             }
           }
         ])
-      );
+      , true);
     }
 
     async function reloadConfig() {

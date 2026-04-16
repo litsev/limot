@@ -16,7 +16,7 @@ import { MonitorStore } from "./lib/monitor-store.mjs";
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB_ROOT = resolve(PROJECT_ROOT, "web");
 const DATA_ROOT = resolve(PROJECT_ROOT, "data");
-const CONFIG_PATH = resolve(PROJECT_ROOT, "config.yaml");
+const CONFIG_PATH = resolve(PROJECT_ROOT, "config", "config.yaml");
 
 const configStore = new ConfigStore(CONFIG_PATH);
 await configStore.load("startup");
@@ -187,6 +187,20 @@ async function requestHandler(req, res) {
       return {
         configVersion: configStore.version,
         config: configStore.getAgentRuntimeConfig(clientId)
+      };
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/agent/report_directory") {
+    await handleAgentRequest(req, res, async ({ clientId, payload }) => {
+      const resolvedAlerts = monitorStore.upsertReport(clientId, payload);
+      await csvStore.appendDirectoryReport(clientId, payload);
+      if (resolvedAlerts.length > 0) {
+        await csvStore.appendResolvedAlerts(clientId, payload.collectedAt, resolvedAlerts);
+      }
+      return {
+        acceptedAt: new Date().toISOString()
       };
     });
     return;

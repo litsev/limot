@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, resolve, join } from "node:path";
 import YAML from "js-yaml";
 
 const DEFAULT_CONFIG = {
@@ -61,8 +61,43 @@ export class ConfigStore {
     } else {
       parsed = JSON.parse(raw);
     }
+
+    // Load separated client configs
+    try {
+      const clientsDir = join(this.configDir, "clients");
+      const clientFiles = await readdir(clientsDir);
+      parsed.clients = [];
+      
+      for (const file of clientFiles) {
+        if (file.endsWith(".yaml") || file.endsWith(".yml")) {
+          const clientRaw = await readFile(join(clientsDir, file), "utf8");
+          const clientParsed = YAML.load(clientRaw);
+          if (clientParsed && clientParsed.id) {
+            parsed.clients.push(clientParsed);
+          }
+        }
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        console.error("[config] Failed to load client configs:", err);
+      }
+    }
     
     const merged = deepMerge(DEFAULT_CONFIG, parsed);
+
+    // Apply default warnGB to directories
+    const defaultWarnGB = merged.defaults.warnGB || 100;
+    if (merged.clients) {
+      for (const client of merged.clients) {
+        if (client.directories && Array.isArray(client.directories)) {
+          for (const dir of client.directories) {
+            if (dir.warnGB === undefined) {
+              dir.warnGB = defaultWarnGB;
+            }
+          }
+        }
+      }
+    }
 
     this.config = merged;
     this.version += 1;

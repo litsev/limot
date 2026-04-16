@@ -149,6 +149,32 @@ export class CsvStore {
     this.rootDir = resolve(rootDir);
   }
 
+  async appendDirectoryReport(clientId, report) {
+    const collectedAt = report.collectedAt ?? new Date().toISOString();
+    const yearDir = resolve(
+      this.rootDir,
+      String(new Date(collectedAt).getUTCFullYear()),
+      clientId
+    );
+    await mkdir(yearDir, { recursive: true });
+
+    const writes = [];
+
+    // 目录数据
+    for (const directory of report.directories ?? []) {
+      writes.push(
+        this.appendRow(resolve(yearDir, "directory.csv"), DIRECTORY_HEADERS, {
+          ts: collectedAt,
+          dir_key: directory.key,
+          dir_path: directory.path,
+          size_bytes: directory.sizeBytes
+        })
+      );
+    }
+
+    await Promise.all(writes);
+  }
+
   async appendReport(clientId, report) {
     const collectedAt = report.collectedAt ?? new Date().toISOString();
     const yearDir = resolve(
@@ -216,15 +242,17 @@ export class CsvStore {
     }
 
     // 目录数据
-    for (const directory of report.directories ?? []) {
-      writes.push(
-        this.appendRow(resolve(yearDir, "directory.csv"), DIRECTORY_HEADERS, {
-          ts: collectedAt,
-          dir_key: directory.key,
-          dir_path: directory.path,
-          size_bytes: directory.sizeBytes
-        })
-      );
+    if (report.directories) {
+      for (const directory of report.directories) {
+        writes.push(
+          this.appendRow(resolve(yearDir, "directory.csv"), DIRECTORY_HEADERS, {
+            ts: collectedAt,
+            dir_key: directory.key,
+            dir_path: directory.path,
+            size_bytes: directory.sizeBytes
+          })
+        );
+      }
     }
 
     // 并行执行所有写入操作

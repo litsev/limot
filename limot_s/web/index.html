@@ -56,21 +56,51 @@
                       {{ server.online ? '在线' : '离线' }}
                     </span>
                   </div>
-                  <div class="server-card-grid">
-                    <div>
-                      <label>CPU</label>
-                      <span>{{ formatPct(server.system?.cpu?.pct) }}</span>
+                  <div class="server-card-metrics">
+                    <div class="server-metric">
+                      <div class="server-metric-text">
+                        <label>CPU</label>
+                        <span>{{ formatPct(server.system?.cpu?.pct) }}</span>
+                      </div>
+                      <div class="metric-bar">
+                        <div class="metric-fill" :style="{ width: (server.system?.cpu?.pct || 0) + '%' }"></div>
+                      </div>
                     </div>
-                    <div>
-                      <label>内存使用率</label>
-                      <span>{{ formatPct(server.system?.memory?.pct) }}</span>
+                    <div class="server-metric">
+                      <div class="server-metric-text">
+                        <label>内存使用率</label>
+                        <span>{{ formatPct(server.system?.memory?.pct) }}</span>
+                      </div>
+                      <div class="metric-bar">
+                        <div class="metric-fill" :style="{ width: (server.system?.memory?.pct || 0) + '%' }"></div>
+                      </div>
                     </div>
-                    <div>
-                      <label>GPU使用率</label>
-                      <span>{{ server.gpu?.available ? formatPct(server.gpu.summary?.utilizationPct) : '--' }}</span>
+                    <div class="server-metric">
+                      <div class="server-metric-text">
+                        <label>GPU使用率</label>
+                        <span>{{ server.gpu?.available ? formatPct(server.gpu.summary?.utilizationPct) : '--' }}</span>
+                      </div>
+                      <div class="metric-bar">
+                        <div class="metric-fill" :style="{ width: (server.gpu?.summary?.utilizationPct || 0) + '%' }"></div>
+                      </div>
+                    </div>
+                    <div class="server-metric" v-if="server.filesystems?.length > 0">
+                      <div class="server-metric-text">
+                        <label>磁盘使用率({{ server.filesystems[0].mount }})</label>
+                        <span>{{ formatPct(server.filesystems[0].usedPct) }}</span>
+                      </div>
+                      <div class="metric-bar">
+                        <div class="metric-fill" :style="{ width: (server.filesystems[0].usedPct || 0) + '%' }"></div>
+                      </div>
                     </div>
                   </div>
-                  <small>最近心跳：{{ formatDateTime(server.lastSeen) }}</small>
+                  <div class="server-card-footer">
+                    <small>最近心跳：{{ formatDateTime(server.lastSeen) }}</small>
+                    <span v-if="server.currentAlerts?.filter(a => a.status === 'active').length" 
+                          :class="['server-alert-badge', server.currentAlerts.some(a => a.status === 'active' && a.level === 'critical') ? 'badge-critical' : 'badge-warn']">
+                      {{ server.currentAlerts.filter(a => a.status === 'active').length }} 告警
+                    </span>
+                  </div>
                 </button>
               </div>
             </section>
@@ -83,11 +113,15 @@
                   <h2>{{ selectedServer.id }}</h2>
                   <p>服务器 ID</p>
                 </div>
-                <div class="filters">
-                  <el-select v-model="hoursRange" size="small" @change="refreshSelectedServer">
-                    <el-option label="最近 6 小时" :value="6" />
-                    <el-option label="最近 24 小时" :value="24" />
-                    <el-option label="最近 72 小时" :value="72" />
+                <div class="filters" style="align-items: center;">
+                  <span style="font-size: 13px; color: var(--el-text-color-regular);">时间范围：</span>
+                  <el-select v-model="hoursRange" size="small" @change="refreshSelectedServer" placeholder="请选择时间范围" style="width: 140px;">
+                    <el-option label="最近 1 小时" :value="1"></el-option>
+                    <el-option label="最近 1 天" :value="24"></el-option>
+                    <el-option label="最近 3 天" :value="72"></el-option>
+                    <el-option label="最近 7 天" :value="168"></el-option>
+                    <el-option label="最近 1 个月" :value="720"></el-option>
+                    
                   </el-select>
                 </div>
               </div>
@@ -143,13 +177,20 @@
                       ({{ formatPct(selectedServer.system?.memory?.pct) }})
                     </strong>
                   </div>
+                  <div class="metric-pill" v-for="fs in selectedServer.filesystems" :key="fs.mount">
+                    <label>文件系统({{ fs.mount }})</label>
+                    <strong>{{ formatBytes(fs.usedBytes) }} /
+                      {{ formatBytes(fs.totalBytes) }}
+                      ({{ fs.usedPct }}%)
+                    </strong>
+                  </div>
                 </div>
               </div>
 
               <div class="chart-grid">
                 <div class="chart-card" v-if="selectedServer?.gpu?.available">
                   <div class="chart-title">GPU 设备状态</div>
-                  <div class="gpu-list">
+                  <div class="gpu-list" :style="{'--gpu-cols': Math.min(selectedServer.gpu.devices.length, 3)}">
                     <div v-for="device in selectedServer.gpu.devices" :key="device.index" class="gpu-card">
                       <div class="gpu-card-header">
                         <strong>GPU {{ device.index }}: {{ device.name }}</strong>

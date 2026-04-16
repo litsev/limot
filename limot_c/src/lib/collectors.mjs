@@ -273,7 +273,7 @@ export function buildCurrentAlerts(report, runtimeConfig) {
   const thresholds = runtimeConfig.thresholds ?? {};
   const alerts = [];
 
-  if (report.system.cpu.pct >= thresholds.cpuWarn) {
+  if (report.system && report.system.cpu.pct >= thresholds.cpuWarn) {
     alerts.push({
       id: "cpu",
       alertKey: "cpu",
@@ -287,7 +287,7 @@ export function buildCurrentAlerts(report, runtimeConfig) {
     });
   }
 
-  if (report.system.memory.pct >= thresholds.memWarn) {
+  if (report.system && report.system.memory.pct >= thresholds.memWarn) {
     alerts.push({
       id: "memory",
       alertKey: "memory",
@@ -301,7 +301,7 @@ export function buildCurrentAlerts(report, runtimeConfig) {
     });
   }
 
-  if (report.system.load.perCore >= thresholds.load1PerCoreWarn) {
+  if (report.system && report.system.load.perCore >= thresholds.load1PerCoreWarn) {
     alerts.push({
       id: "load-per-core",
       alertKey: "load-per-core",
@@ -319,7 +319,7 @@ export function buildCurrentAlerts(report, runtimeConfig) {
   }
   
 
-  for (const filesystem of report.filesystems) {
+  for (const filesystem of report.filesystems || []) {
     if (filesystem.usedPct >= thresholds.diskWarn) {
       alerts.push({
         id: `filesystem:${filesystem.mount}`,
@@ -338,7 +338,7 @@ export function buildCurrentAlerts(report, runtimeConfig) {
   const directoryRules = new Map(
     (runtimeConfig.directories ?? []).map((directory) => [directory.key, directory])
   );
-  for (const directory of report.directories) {
+  for (const directory of report.directories || []) {
     const rule = directoryRules.get(directory.key);
     if (!rule || !rule.warnGB || directory.sizeBytes === null) {
       continue;
