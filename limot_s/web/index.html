@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Limot Monitor</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div class="page-shell">
+        <div class="hero">
+          <div>
+            <p class="eyebrow">LIMOT MONITOR</p>
+            <h1>服务器实时监控中心</h1>
+            <p class="hero-copy">
+              查看节点在线状态、资源使用率、目录容量增长趋势和告警变化。
+            </p>
+          </div>
+          <div class="hero-side">
+            <div class="hero-stat">
+              <span>配置版本</span>
+              <strong>{{ publicConfig.version ?? '--' }}</strong>
+            </div>
+            <div class="hero-stat">
+              <span>已接入服务器</span>
+              <strong>{{ servers.length }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <el-row :gutter="18">
+          <el-col :xs="24" :lg="9">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>节点总览</h2>
+                  <p>实时状态由 SSE 推送更新</p>
+                </div>
+                <el-button type="primary" plain @click="reloadConfig">重载配置</el-button>
+              </div>
+              <div class="server-list">
+                <button
+                  v-for="server in servers"
+                  :key="server.id"
+                  class="server-card"
+                  :class="{ active: server.id === selectedServerId }"
+                  @click="selectServer(server.id)"
+                >
+                  <div class="server-card-top">
+                    <div>
+                      <strong>{{ server.id }}</strong>
+                    </div>
+                    <span class="status-dot" :class="server.online ? 'online' : 'offline'">
+                      {{ server.online ? '在线' : '离线' }}
+                    </span>
+                  </div>
+                  <div class="server-card-grid">
+                    <div>
+                      <label>CPU</label>
+                      <span>{{ formatPct(server.system?.cpu?.pct) }}</span>
+                    </div>
+                    <div>
+                      <label>内存</label>
+                      <span>{{ formatPct(server.system?.memory?.pct) }}</span>
+                    </div>
+                    <div>
+                      <label>GPU</label>
+                      <span>{{ formatPct(server.gpu?.summary?.utilizationPct) }}</span>
+                    </div>
+                    <div>
+                      <label>告警</label>
+                      <span>{{ server.currentAlerts?.length ?? 0 }}</span>
+                    </div>
+                  </div>
+                  <small>最近心跳：{{ formatDateTime(server.lastSeen) }}</small>
+                </button>
+              </div>
+            </section>
+          </el-col>
+
+          <el-col :xs="24" :lg="15">
+            <section class="panel detail-panel" v-if="selectedServer">
+              <div class="panel-head">
+                <div>
+                  <h2>{{ selectedServer.id }}</h2>
+                  <p>服务器 ID</p>
+                </div>
+                <div class="filters">
+                  <el-select v-model="hoursRange" size="small" @change="refreshSelectedServer">
+                    <el-option label="最近 6 小时" :value="6" />
+                    <el-option label="最近 24 小时" :value="24" />
+                    <el-option label="最近 72 小时" :value="72" />
+                  </el-select>
+                  <el-select
+                    v-model="selectedMount"
+                    size="small"
+                    placeholder="选择挂载点"
+                    @change="loadFilesystemHistory"
+                  >
+                    <el-option
+                      v-for="mount in mountOptions"
+                      :key="mount"
+                      :label="mount"
+                      :value="mount"
+                    />
+                  </el-select>
+                  <el-select
+                    v-model="selectedDirKey"
+                    size="small"
+                    placeholder="选择目录"
+                    @change="loadDirectoryHistory"
+                  >
+                    <el-option
+                      v-for="directory in directoryOptions"
+                      :key="directory.key"
+                      :label="`${directory.key} · ${directory.path}`"
+                      :value="directory.key"
+                    />
+                  </el-select>
+                </div>
+              </div>
+
+              <div class="metric-strip">
+                <div class="metric-pill">
+                  <label>CPU</label>
+                  <strong>{{ formatPct(selectedServer.system?.cpu?.pct) }}</strong>
+                </div>
+                <div class="metric-pill">
+                  <label>内存</label>
+                  <strong>{{ formatPct(selectedServer.system?.memory?.pct) }}</strong>
+                </div>
+                <div class="metric-pill">
+                  <label>负载/核</label>
+                  <strong>{{ formatFixed(selectedServer.system?.load?.perCore) }}</strong>
+                </div>
+                <div class="metric-pill">
+                  <label>GPU</label>
+                  <strong>{{ formatPct(selectedServer.gpu?.summary?.utilizationPct) }}</strong>
+                </div>
+              </div>
+
+              <div class="chart-grid">
+                <div class="chart-card">
+                  <div class="chart-title">CPU / 内存 / 负载 / GPU</div>
+                  <div id="system-chart" class="chart"></div>
+                </div>
+                <div class="chart-card">
+                  <div class="chart-title">文件系统使用率</div>
+                  <div id="filesystem-chart" class="chart"></div>
+                </div>
+                <div class="chart-card">
+                  <div class="chart-title">指定目录磁盘占用</div>
+                  <div id="directory-chart" class="chart"></div>
+                </div>
+              </div>
+
+              <div class="table-section">
+                <div class="chart-title">最近告警事件</div>
+                <el-table :data="alertRows" height="280">
+                  <el-table-column prop="ts" label="时间" min-width="170" />
+                  <el-table-column prop="level" label="级别" width="90" />
+                  <el-table-column prop="status" label="状态" width="90" />
+                  <el-table-column prop="source" label="来源" min-width="150" />
+                  <el-table-column prop="message" label="消息" min-width="280" />
+                </el-table>
+              </div>
+            </section>
+          </el-col>
+        </el-row>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/element-plus"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
