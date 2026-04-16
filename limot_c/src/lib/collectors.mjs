@@ -355,7 +355,7 @@ export async function collectGpuMetrics() {
   }
 }
 
-export function buildCurrentAlerts(report, runtimeConfig) {
+export async function buildCurrentAlerts(report, runtimeConfig) {
   const thresholds = runtimeConfig.thresholds ?? {};
   const alerts = [];
 
@@ -374,6 +374,26 @@ export function buildCurrentAlerts(report, runtimeConfig) {
   }
 
   if (report.system && report.system.memory.pct >= thresholds.memWarn) {
+    let extraMsg = "";
+    try {
+      const { stdout } = await execFileAsync("sh", ["-c", "ps -eo pid,%mem,comm --sort=-%mem | head -n 4 | tail -n 3"]);
+      const lines = stdout.trim().split("\\n");
+      const pids = lines.map(line => line.trim().split(/\\s+/)[0]).filter(p => p && !isNaN(p));
+      const details = [];
+      const fs = await import("node:fs/promises");
+      for (const pid of pids) {
+        try {
+          const cwd = await fs.readlink(`/proc/${pid}/cwd`);
+          details.push(`PID: ${pid} (${cwd})`);
+        } catch {
+          details.push(`PID: ${pid} (未知目录)`);
+        }
+      }
+      if (details.length) {
+        extraMsg = `。Top 3 进程: ${details.join(", ")}`;
+      }
+    } catch (e) {}
+
     alerts.push({
       id: "memory",
       alertKey: "memory",
@@ -382,7 +402,7 @@ export function buildCurrentAlerts(report, runtimeConfig) {
       level: chooseAlertLevel(report.system.memory.pct, thresholds.memWarn),
       currentValue: report.system.memory.pct,
       threshold: thresholds.memWarn,
-      message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%`,
+      message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%${extraMsg}`,
       detectedAt: report.collectedAt
     });
   }

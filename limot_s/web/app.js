@@ -391,7 +391,7 @@ createApp({
         dirKeys = dirKeys.filter((key) => key.toLowerCase().includes(filterLower));
       }
 
-      const tsSet = [...new Set(history.directory.map((r) => r.ts))].sort();
+      const tsSet = [...new Set(history.directory.map((r) => r.ts))].sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
       const xAxis = tsSet.map((ts) => formatDateTime(ts));
 
       const series = dirKeys.map((dirKey) => {
@@ -402,12 +402,28 @@ createApp({
             const sizeGb = Number((r.sizeBytes / 1024 / 1024 / 1024).toFixed(3));
             dataMap.set(r.ts, sizeGb);
           });
+          
+        let lastKnown = null;
+        for (const ts of tsSet) {
+          if (dataMap.has(ts)) {
+            lastKnown = dataMap.get(ts);
+            break;
+          }
+        }
+        
+        const data = tsSet.map((ts) => {
+          if (dataMap.has(ts)) {
+            lastKnown = dataMap.get(ts);
+          }
+          return lastKnown;
+        });
+
         return {
           name: dirKey,
           type: "line",
           smooth: true,
           connectNulls: true,
-          data: tsSet.map((ts) => dataMap.get(ts) ?? null),
+          data,
           tooltip: {
             valueFormatter: (value) => value !== null ? `${value} GB` : '--'
           }

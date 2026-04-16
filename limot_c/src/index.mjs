@@ -137,7 +137,7 @@ async function buildReportPayload() {
     filesystems,
   };
 
-  const currentAlerts = buildCurrentAlerts(report, config);
+  const currentAlerts = await buildCurrentAlerts(report, config);
   const allAlerts = diffAlertEvents(currentAlerts, 'base');
   await persistAlertState();
 
@@ -159,7 +159,7 @@ async function directoryLoop() {
 
     try {
       const directories = await collectDirectoryMetrics(config);
-      const directoryAlerts = buildCurrentAlerts({ directories }, config);
+      const directoryAlerts = await buildCurrentAlerts({ directories }, config);
       const report = {
         collectedAt: new Date().toISOString(),
         directories: directories.filter(d => !d.isCached)
