@@ -7,3 +7,4 @@ limot_c/logs/*
 node_modules/
 limot_s/config.yaml
 limot_c/config.yaml
+limot_s/config/clients/*.ymal

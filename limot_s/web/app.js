@@ -105,7 +105,12 @@ createApp({
     let directoryChart = null;
 
     async function fetchJson(url, options) {
-      const response = await fetch(url, options);
+      // Create a URL object from the given relative or absolute URL, stripping origin credentials
+      const parsedUrl = new URL(url, window.location.href);
+      parsedUrl.username = '';
+      parsedUrl.password = '';
+      
+      const response = await fetch(parsedUrl.href, options);
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.error ?? `HTTP ${response.status}`);
@@ -456,7 +461,10 @@ createApp({
     }
 
     function attachSse() {
-      const stream = new EventSource("/api/events");
+      const eventsUrl = new URL("/api/events", window.location.href);
+      eventsUrl.username = '';
+      eventsUrl.password = '';
+      const stream = new EventSource(eventsUrl.href);
       stream.addEventListener("snapshot", async (event) => {
         servers.value = JSON.parse(event.data);
         if (!selectedServerId.value && servers.value[0]) {
