@@ -8,6 +8,8 @@
     "dev": "node --watch server/index.mjs"
   },
   "dependencies": {
-    "js-yaml": "^4.1.1"
+    "@pinixai/weixin-bot": "^1.2.0",
+    "js-yaml": "^4.1.1",
+    "sqlite3": "^6.0.1"
   }
 }

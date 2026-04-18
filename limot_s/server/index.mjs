@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ConfigStore } from "./lib/config-store.mjs";
-import { CsvStore } from "./lib/csv-store.mjs";
+import { SqliteStore } from "./lib/sqlite-store.mjs";
 import {
   parseTimeRange,
   readJsonBody,
@@ -12,6 +12,7 @@ import {
   serveStaticFile
 } from "./lib/http-utils.mjs";
 import { MonitorStore } from "./lib/monitor-store.mjs";
+import { WechatNotifier } from "./lib/wechat-notifier.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB_ROOT = resolve(PROJECT_ROOT, "web");
@@ -22,8 +23,13 @@ const configStore = new ConfigStore(CONFIG_PATH);
 await configStore.load("startup");
 configStore.watch();
 
-const csvStore = new CsvStore(DATA_ROOT);
+const sqliteStore = new SqliteStore(DATA_ROOT);
+await sqliteStore.init();
+
 const monitorStore = new MonitorStore(configStore);
+
+const wechatNotifier = new WechatNotifier(configStore, monitorStore);
+wechatNotifier.start();
 
 configStore.onReload(async () => {
   monitorStore.broadcast("config", configStore.getPublicConfig());
@@ -131,7 +137,7 @@ async function requestHandler(req, res) {
     const [clientId] = systemHistoryMatch.slice(1);
     const range = parseTimeRange(searchParams);
     sendJson(res, 200, {
-      rows: await csvStore.querySystemHistory(clientId, range)
+      rows: await sqliteStore.querySystemHistory(clientId, range)
     });
     return;
   }
@@ -144,7 +150,7 @@ async function requestHandler(req, res) {
     const [clientId] = filesystemHistoryMatch.slice(1);
     const range = parseTimeRange(searchParams);
     sendJson(res, 200, {
-      rows: await csvStore.queryFilesystemHistory(clientId, {
+      rows: await sqliteStore.queryFilesystemHistory(clientId, {
         ...range,
         mount: searchParams.get("mount")
       })
@@ -160,7 +166,7 @@ async function requestHandler(req, res) {
     const [clientId] = directoryHistoryMatch.slice(1);
     const range = parseTimeRange(searchParams);
     sendJson(res, 200, {
-      rows: await csvStore.queryDirectoryHistory(clientId, {
+      rows: await sqliteStore.queryDirectoryHistory(clientId, {
         ...range,
         dirKey: searchParams.get("dirKey")
       })
@@ -173,16 +179,19 @@ async function requestHandler(req, res) {
     const [clientId] = alertsMatch.slice(1);
     const range = parseTimeRange(searchParams, 24 * 30);
     sendJson(res, 200, {
-      rows: await csvStore.queryAlerts(clientId, range)
+      rows: await sqliteStore.queryAlerts(clientId, range)
     });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/agent/config") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
-      // 更新客户端内存信息
+      // 更新客户端内存信息及GPU数量
       if (payload.memory) {
         monitorStore.upsertMemoryInfo(clientId, payload.memory);
+      }
+      if (payload.gpuCount !== undefined) {
+        monitorStore.upsertGpuCount(clientId, payload.gpuCount, wechatNotifier);
       }
       return {
         configVersion: configStore.version,
@@ -194,10 +203,26 @@ async function requestHandler(req, res) {
 
   if (req.method === "POST" && pathname === "/api/agent/report_directory") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
-      const resolvedAlerts = monitorStore.upsertReport(clientId, payload);
-      await csvStore.appendDirectoryReport(clientId, payload);
+      const { resolvedAlerts, newAlerts } = monitorStore.upsertReport(clientId, payload);
+      await sqliteStore.appendDirectoryReport(clientId, payload);
+      
+      if (newAlerts && newAlerts.length > 0) {
+        await sqliteStore.appendAlerts(clientId, payload.collectedAt, newAlerts);
+        const text = newAlerts.map(a => {
+          const icon = a.level === 'critical' ? '🚨 严重' : '⚠️ 普通';
+          let str = `${icon}告警 [${clientId}]: ${a.message} (当前: ${a.currentValue})`;
+          if (a.alertDetails && Array.isArray(a.alertDetails) && a.alertDetails.length > 0) {
+            str += `\n🔍 异常进程:\n` + a.alertDetails.map(d => `  - ${d}`).join("\n");
+          }
+          return str;
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+      
       if (resolvedAlerts.length > 0) {
-        await csvStore.appendResolvedAlerts(clientId, payload.collectedAt, resolvedAlerts);
+        await sqliteStore.appendAlerts(clientId, payload.collectedAt, resolvedAlerts);
+        const text = resolvedAlerts.map(a => `✅ 告警恢复 [${clientId}]: ${a.message}`).join("\n");
+        wechatNotifier.notify(text);
       }
       return {
         acceptedAt: new Date().toISOString()
@@ -208,12 +233,28 @@ async function requestHandler(req, res) {
 
   if (req.method === "POST" && pathname === "/api/agent/report") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
-      const resolvedAlerts = monitorStore.upsertReport(clientId, payload);
+      const { resolvedAlerts, newAlerts } = monitorStore.upsertReport(clientId, payload);
       // 先记录系统指标和活跃告警
-      await csvStore.appendReport(clientId, payload);
+      await sqliteStore.appendReport(clientId, payload);
+      
+      if (newAlerts && newAlerts.length > 0) {
+        await sqliteStore.appendAlerts(clientId, payload.collectedAt, newAlerts);
+        const text = newAlerts.map(a => {
+          const icon = a.level === 'critical' ? '🚨 严重' : '⚠️ 普通';
+          let str = `${icon}告警 [${clientId}]: ${a.message} (当前: ${a.currentValue})`;
+          if (a.alertDetails && Array.isArray(a.alertDetails) && a.alertDetails.length > 0) {
+            str += `\n🔍 异常进程:\n` + a.alertDetails.map(d => `  - ${d}`).join("\n");
+          }
+          return str;
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+      
       // 再记录已解决的历史告警
       if (resolvedAlerts.length > 0) {
-        await csvStore.appendResolvedAlerts(clientId, payload.collectedAt, resolvedAlerts);
+        await sqliteStore.appendAlerts(clientId, payload.collectedAt, resolvedAlerts);
+        const text = resolvedAlerts.map(a => `✅ 告警恢复 [${clientId}]: ${a.message}`).join("\n");
+        wechatNotifier.notify(text);
       }
       return {
         acceptedAt: new Date().toISOString()
@@ -244,6 +285,28 @@ async function requestHandler(req, res) {
 
 const serverConfig = configStore.getConfig().server;
 const server = http.createServer(requestHandler);
+
+// Setup daily data compression job
+function scheduleDailyCompression() {
+  const now = new Date();
+  const nextTarget = new Date();
+  nextTarget.setHours(0, 5, 0, 0); // Schedule at 00:05:00 local time
+  if (now.getTime() > nextTarget.getTime()) {
+    nextTarget.setDate(nextTarget.getDate() + 1);
+  }
+  const delay = nextTarget.getTime() - now.getTime();
+  
+  setTimeout(async () => {
+    try {
+      await sqliteStore.compressYesterdayData();
+    } catch (e) {
+      console.error("[crond] Error running daily compression:", e);
+    }
+    // Reschedule for next day
+    scheduleDailyCompression();
+  }, delay);
+}
+scheduleDailyCompression();
 
 server.listen(serverConfig.port, serverConfig.host, () => {
   console.log(

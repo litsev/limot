@@ -115,7 +115,7 @@
           </el-col>
 
           <el-col :xs="24" :lg="16">
-            <section class="panel detail-panel" v-if="selectedServer">
+            <section id="server-detail-panel" class="panel detail-panel" v-if="selectedServer">
               <div class="panel-head">
                 <div>
                   <h2>{{ selectedServer.id }}</h2>
@@ -200,29 +200,48 @@
                   </div>
                 </div>
 
-                <div class="chart-card">
-                  <div class="chart-title">CPU / 内存 / 负载 / GPU / 显存</div>
+                <div class="chart-card" :class="{ 'is-fullscreen': fullscreenChart === 'system' }">
+                  <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>CPU / 内存 / 负载 / GPU / 显存</span>
+                    <el-button size="small" type="primary" plain @click="toggleFullscreen('system')">
+                      {{ fullscreenChart === 'system' ? '退出全屏' : '全屏放大' }}
+                    </el-button>
+                  </div>
                   <div id="system-chart" class="chart"></div>
                 </div>
 
-                <div class="chart-card">
+                <div class="chart-card" :class="{ 'is-fullscreen': fullscreenChart === 'directory' }">
                   <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
                     <span>目录大小折线图</span>
-                    <el-input v-model="directoryFilter" placeholder="搜索目录/用户..." size="small" style="width: 200px;" clearable></el-input>
+                    <div style="display: flex; gap: 8px;">
+                      <el-input v-model="directoryFilter" placeholder="搜索目录/用户..." size="small" style="width: 140px;" clearable></el-input>
+                      <el-button size="small" type="primary" plain @click="toggleFullscreen('directory')">
+                        {{ fullscreenChart === 'directory' ? '退出全屏' : '全屏放大' }}
+                      </el-button>
+                    </div>
                   </div>
                   <div id="directory-chart" class="chart"></div>
                 </div>
 
-                <div class="chart-card">
-                  <div class="chart-title">磁盘使用率</div>
+                <div class="chart-card" :class="{ 'is-fullscreen': fullscreenChart === 'filesystem' }">
+                  <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>磁盘使用率</span>
+                    <el-button size="small" type="primary" plain @click="toggleFullscreen('filesystem')">
+                      {{ fullscreenChart === 'filesystem' ? '退出全屏' : '全屏放大' }}
+                    </el-button>
+                  </div>
                   <div id="filesystem-chart" class="chart"></div>
                 </div>
 
                 <div class="chart-card">
                   <div class="table-section">
-                    <div class="chart-title">最近告警事件</div>
+                    <div class="chart-title">历史告警</div>
                     <el-table :data="alertRows" height="280">
-                      <el-table-column prop="ts" label="时间" min-width="170"></el-table-column>
+                      <el-table-column prop="ts" label="时间" min-width="170">
+                        <template #default="scope">
+                          {{ formatDateTime(scope.row.ts) }}
+                        </template>
+                      </el-table-column>
                       <el-table-column prop="level" label="级别" width="90"></el-table-column>
                       <el-table-column prop="status" label="状态" width="90"></el-table-column>
                       <el-table-column prop="source" label="来源" min-width="150"></el-table-column>

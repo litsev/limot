@@ -9,6 +9,7 @@ export class MonitorStore {
 
   upsertReport(clientId, payload) {
     const current = this.latest.get(clientId) ?? {};
+    const oldAlerts = current.currentAlerts ?? [];
     const activeAlerts = (payload.currentAlerts ?? []).filter(
       (alert) => alert.status === "active"
     );
@@ -16,6 +17,9 @@ export class MonitorStore {
       (alert) => alert.status === "resolved"
     );
     
+    const oldAlertIds = new Set(oldAlerts.map(a => a.id));
+    const newAlerts = activeAlerts.filter(a => !oldAlertIds.has(a.id));
+
     // 合并目录状态：保留未被本次上报覆盖的历史目录最新数据
     const mergedDirectoriesMap = new Map((current.directories ?? []).map(d => [d.key, d]));
     for (const d of (payload.directories ?? [])) {
@@ -37,8 +41,8 @@ export class MonitorStore {
     });
     this.broadcast("snapshot", this.getServerSummaries());
     
-    // 返回已解决的告警供caller处理
-    return resolvedAlerts;
+    // 返回已解决和新的告警供caller处理
+    return { resolvedAlerts, newAlerts };
   }
 
   upsertHeartbeat(clientId, heartbeat) {
@@ -62,6 +66,20 @@ export class MonitorStore {
       updatedAt: new Date().toISOString()
     });
     this.broadcast("snapshot", this.getServerSummaries());
+  }
+
+  upsertGpuCount(clientId, gpuCount, wechatNotifier) {
+    const current = this.latest.get(clientId) ?? {};
+    const oldCount = current.gpuCount;
+    if (oldCount !== undefined && gpuCount < oldCount) {
+      if (wechatNotifier) {
+        wechatNotifier.notify(`🚨 严重告警 [${clientId}]: GPU通信异常！已知数量从 ${oldCount} 减少至 ${gpuCount}`);
+      }
+    }
+    this.latest.set(clientId, {
+      ...current,
+      gpuCount
+    });
   }
 
   getMemoryInfo(clientId) {

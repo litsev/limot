@@ -61,6 +61,7 @@ createApp({
     const directoryFilter = ref("");
     const alertRows = ref([]);
     const hiddenAlertKeys = ref(new Set());
+    const fullscreenChart = ref(null);
 
     const history = reactive({
       system: [],
@@ -229,6 +230,49 @@ createApp({
       );
       history.directory = payload.rows ?? [];
       renderDirectoryChart();
+    }
+
+    async function toggleFullscreen(chartName) {
+      const isEntering = fullscreenChart.value !== chartName;
+      fullscreenChart.value = isEntering ? chartName : null;
+      
+      const selectorMap = {
+        'system': '#system-chart',
+        'directory': '#directory-chart',
+        'filesystem': '#filesystem-chart'
+      };
+
+      try {
+        if (isEntering) {
+          const el = document.querySelector(selectorMap[chartName])?.parentElement;
+          if (el && el.requestFullscreen) {
+            await el.requestFullscreen();
+            if (screen.orientation && screen.orientation.lock) {
+              await screen.orientation.lock('landscape').catch(() => {});
+            }
+          }
+        } else {
+          if (document.fullscreenElement) {
+            await document.exitFullscreen();
+          }
+          if (screen.orientation && screen.orientation.unlock) {
+            screen.orientation.unlock();
+          }
+        }
+      } catch (err) {
+        console.warn("Fullscreen API error:", err);
+      }
+
+      const resizeAction = () => {
+        systemChart?.resize();
+        filesystemChart?.resize();
+        if (directoryChart) {
+          renderDirectoryChart();
+        }
+      };
+
+      setTimeout(resizeAction, 50);
+      setTimeout(resizeAction, 300); // 兼容屏幕旋转的耗时
     }
 
     async function refreshSelectedServer() {
@@ -435,16 +479,29 @@ createApp({
         };
       });
 
-      directoryChart.setOption(
-        baseChartOption("目录容量", xAxis, series, [
-          {
-            type: "value",
-            axisLabel: {
-              formatter: '{value} GB'
-            }
+      const chartDom = document.getElementById("directory-chart");
+      const containerWidth = chartDom.clientWidth || (window.innerWidth - 80);
+      // 估算图例每项宽度约 120px
+      const itemsPerRow = Math.max(1, Math.floor(containerWidth / 120));
+      const rows = Math.ceil(series.length / itemsPerRow);
+      // 默认基础 grid.top 为 90，按需增加
+      const topOffset = Math.max(90, rows * 24 + 40);
+      
+      // 绘图核心区域高度为 156px (原定 280 - 90 - 34)
+      chartDom.style.height = (156 + topOffset + 34) + "px";
+      directoryChart.resize();
+
+      const option = baseChartOption("目录容量", xAxis, series, [
+        {
+          type: "value",
+          axisLabel: {
+            formatter: '{value} GB'
           }
-        ])
-      , true);
+        }
+      ]);
+      option.grid.top = topOffset;
+
+      directoryChart.setOption(option, true);
     }
 
     async function reloadConfig() {
@@ -458,6 +515,16 @@ createApp({
 
     function selectServer(serverId) {
       selectedServerId.value = serverId;
+      
+      // 当屏幕宽度小于 1200px (变成上下堆叠布局时)，自动平滑滚动到详情面板
+      if (window.innerWidth < 1200) {
+        nextTick(() => {
+          const detailPanel = document.getElementById("server-detail-panel");
+          if (detailPanel) {
+            detailPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        });
+      }
     }
 
     function attachSse() {
@@ -490,7 +557,18 @@ createApp({
     window.addEventListener("resize", () => {
       systemChart?.resize();
       filesystemChart?.resize();
-      directoryChart?.resize();
+      if (directoryChart) {
+        renderDirectoryChart(); // 重新计算自适应高度并重绘图表
+      }
+    });
+
+    document.addEventListener("fullscreenchange", () => {
+      if (!document.fullscreenElement) {
+        fullscreenChart.value = null;
+        if (screen.orientation && screen.orientation.unlock) {
+          screen.orientation.unlock();
+        }
+      }
     });
 
     onMounted(async () => {
@@ -510,6 +588,7 @@ createApp({
       formatDateTime,
       formatFixed,
       formatPct,
+      fullscreenChart,
       hoursRange,
       loadDirectoryHistory,
       loadFilesystemHistory,
@@ -520,6 +599,7 @@ createApp({
       selectedServer,
       selectedServerId,
       servers,
+      toggleFullscreen,
       visibleAlerts
     };
   }

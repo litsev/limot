@@ -98,6 +98,9 @@ async function persistAlertState() {
 }
 
 async function syncRuntimeConfig() {
+  const gpus = await collectGpuMetrics();
+  const gpuCount = gpus.devices ? gpus.devices.length : 0;
+  
   const response = await agentRequest("/api/agent/config", {
     requestedAt: new Date().toISOString(),
     agentVersion: AGENT_VERSION,
@@ -105,7 +108,8 @@ async function syncRuntimeConfig() {
     memory: {
       totalBytes: os.totalmem(),
       collectedAt: new Date().toISOString()
-    }
+    },
+    gpuCount
   });
 
   if (response.config) {
@@ -181,8 +185,8 @@ async function directoryLoop() {
     }
 
     const elapsed = Date.now() - startedAt;
-    // 基础loop每秒运行一次，以便更细粒度地判断各目录自身的scanIntervalSec
-    const waitMs = Math.max(1000 - elapsed, 100);
+    // 基础loop每 1 分钟运行一次，以便判断各目录自身的scanIntervalSec
+    const waitMs = Math.max(60000 - elapsed, 1000);
     await sleep(waitMs);
   }
 }
