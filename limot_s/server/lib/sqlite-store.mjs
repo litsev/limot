@@ -58,11 +58,18 @@ export class SqliteStore {
 
   async compressYesterdayData() {
     const now = new Date();
-    // 压缩前天的数据（留一天缓冲）：前天的 00:00:00 - 23:59:59 (基于 UTC 零点分割)
+    // 压缩前天的数据（留一天缓冲）：基于本地时间的 00:00:00 - 23:59:59，并转为 ISO 供查询
     const targetDate = new Date(now.getTime() - 48 * 60 * 60 * 1000);
-    const dateStr = targetDate.toISOString().split('T')[0];
-    const startIso = dateStr + "T00:00:00.000Z";
-    const endIso = dateStr + "T23:59:59.999Z";
+    const y = targetDate.getFullYear();
+    const m = targetDate.getMonth();
+    const d = targetDate.getDate();
+    
+    const startObj = new Date(y, m, d, 0, 0, 0, 0);
+    const endObj = new Date(y, m, d, 23, 59, 59, 999);
+    
+    const startIso = startObj.toISOString();
+    const endIso = endObj.toISOString();
+    const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
     try {
       await this.run("BEGIN TRANSACTION");
