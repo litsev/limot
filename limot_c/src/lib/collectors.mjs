@@ -2,11 +2,12 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readlink, readdir } from "node:fs/promises";
 
 import { sleep } from "./utils.mjs";
 
 const execFileAsync = promisify(execFile);
+const alertProgress = new Map();
 
 function summarizeCpuSnapshot() {
   return os.cpus().map((cpu) => ({
@@ -19,6 +20,8 @@ class CpuSampler {
   constructor(intervalMs = 1000) {
     this.intervalMs = intervalMs;
     this.cached = 0;
+    this.sum = 0;
+    this.samples = 0;
     this.lastSnapshot = summarizeCpuSnapshot();
     this.started = false;
   }
@@ -43,11 +46,21 @@ class CpuSampler {
     }
 
     this.cached = totalDelta > 0 ? Number((((totalDelta - idleDelta) / totalDelta) * 100).toFixed(2)) : 0;
+    this.sum += this.cached;
+    this.samples += 1;
     this.lastSnapshot = end;
   }
 
   getCachedValue() {
     return this.cached;
+  }
+
+  consumeAverageValue() {
+    const value =
+      this.samples > 0 ? Number((this.sum / this.samples).toFixed(2)) : this.cached;
+    this.sum = 0;
+    this.samples = 0;
+    return value;
   }
 
   stop() {
@@ -68,9 +81,170 @@ export function stopCpuSampler() {
   cpuSampler.stop();
 }
 
+export function startGpuSampler() {
+  gpuSampler.start();
+}
+
+export function stopGpuSampler() {
+  gpuSampler.stop();
+}
+
 function getCpuUsageCached() {
   return cpuSampler.getCachedValue();
 }
+
+function getCpuUsagePeriodAverage() {
+  return cpuSampler.consumeAverageValue();
+}
+
+async function queryGpuSnapshot() {
+  const { stdout } = await execFileAsync("nvidia-smi", [
+    "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+    "--format=csv,noheader,nounits"
+  ]);
+
+  const devices = stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => line.split(",").map((part) => part.trim()))
+    .map(([index, name, util, memoryUsed, memoryTotal, temperature]) => ({
+      index: Number(index),
+      name,
+      utilizationPct: Number(util),
+      memoryUsedMiB: Number(memoryUsed),
+      memoryTotalMiB: Number(memoryTotal),
+      memoryPct:
+        Number(memoryTotal) > 0
+          ? Number(((Number(memoryUsed) / Number(memoryTotal)) * 100).toFixed(2))
+          : 0,
+      temperatureC: Number(temperature)
+    }));
+
+  const utilizationPct = devices.length
+    ? Number((devices.reduce((sum, d) => sum + d.utilizationPct, 0) / devices.length).toFixed(2))
+    : null;
+
+  const totalMemoryUsedMiB = devices.reduce((sum, d) => sum + d.memoryUsedMiB, 0);
+  const totalMemoryMiB = devices.reduce((sum, d) => sum + d.memoryTotalMiB, 0);
+  const memoryPct = totalMemoryMiB > 0
+    ? Number(((totalMemoryUsedMiB / totalMemoryMiB) * 100).toFixed(2))
+    : null;
+
+  return {
+    available: devices.length > 0,
+    devices,
+    summary: {
+      utilizationPct,
+      memoryPct
+    }
+  };
+}
+
+class GpuSampler {
+  constructor(intervalMs = 1000) {
+    this.intervalMs = intervalMs;
+    this.started = false;
+    this.latest = {
+      available: false,
+      devices: [],
+      summary: {
+        utilizationPct: null,
+        memoryPct: null
+      }
+    };
+    this.deviceSums = new Map();
+    this.deviceCounts = new Map();
+    this.summaryUtilSum = 0;
+    this.summarySamples = 0;
+  }
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this.timer = setInterval(() => {
+      this.update();
+    }, this.intervalMs);
+    this.timer.unref();
+  }
+
+  async update() {
+    try {
+      const snapshot = await queryGpuSnapshot();
+      this.latest = snapshot;
+
+      if (Number.isFinite(snapshot.summary?.utilizationPct)) {
+        this.summaryUtilSum += snapshot.summary.utilizationPct;
+        this.summarySamples += 1;
+      }
+
+      for (const device of snapshot.devices) {
+        if (!Number.isFinite(device.utilizationPct)) continue;
+        this.deviceSums.set(
+          device.index,
+          (this.deviceSums.get(device.index) ?? 0) + device.utilizationPct
+        );
+        this.deviceCounts.set(
+          device.index,
+          (this.deviceCounts.get(device.index) ?? 0) + 1
+        );
+      }
+    } catch {
+      this.latest = {
+        available: false,
+        devices: [],
+        summary: {
+          utilizationPct: null,
+          memoryPct: null
+        }
+      };
+    }
+  }
+
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
+    this.started = false;
+  }
+
+  consumeAverageSnapshot() {
+    const devices = this.latest.devices.map((device) => {
+      const count = this.deviceCounts.get(device.index) ?? 0;
+      const sum = this.deviceSums.get(device.index) ?? 0;
+
+      return {
+        ...device,
+        utilizationPct:
+          count > 0 ? Number((sum / count).toFixed(2)) : device.utilizationPct
+      };
+    });
+
+    const utilizationPct =
+      this.summarySamples > 0
+        ? Number((this.summaryUtilSum / this.summarySamples).toFixed(2))
+        : this.latest.summary?.utilizationPct ?? null;
+
+    this.deviceSums.clear();
+    this.deviceCounts.clear();
+    this.summaryUtilSum = 0;
+    this.summarySamples = 0;
+
+    return {
+      ...this.latest,
+      devices,
+      summary: {
+        ...this.latest.summary,
+        utilizationPct
+      }
+    };
+  }
+
+  getLatestSnapshot() {
+    return this.latest;
+  }
+}
+
+const gpuSampler = new GpuSampler();
 
 function parseDfLine(line) {
   const parts = line.trim().split(/\s+/);
@@ -90,11 +264,74 @@ function parseDfLine(line) {
   };
 }
 
-function chooseAlertLevel(currentValue, threshold) {
-  if (currentValue >= threshold + 10) {
+function chooseAlertLevel(currentValue, warnThreshold, criticalThreshold) {
+  if (Number.isFinite(criticalThreshold) && currentValue >= criticalThreshold) {
     return "critical";
   }
+  if (currentValue >= warnThreshold) {
+    return "warn";
+  }
   return "warn";
+}
+
+async function collectTopProcessDetails(metricKey, metricLabel) {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,%cpu,%mem,comm"]);
+    const lines = stdout.trim().split(/\r?\n/).slice(1);
+    const procMap = new Map();
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 5) continue;
+
+      const [pid, ppid, cpu, mem, ...commParts] = parts;
+      procMap.set(pid, {
+        pid,
+        ppid,
+        cpu: parseFloat(cpu) || 0,
+        mem: parseFloat(mem) || 0,
+        comm: commParts.join(" ")
+      });
+    }
+
+    const roots = new Map();
+    const ignoreNames = new Set(["bash", "zsh", "sh", "dash", "tmux", "tmux: server", "sshd", "systemd", "init"]);
+
+    for (const proc of procMap.values()) {
+      let current = proc;
+      while (procMap.has(current.ppid)) {
+        const parent = procMap.get(current.ppid);
+        if (parent.pid === "1" || parent.pid === "2") break;
+        if (ignoreNames.has(parent.comm)) break;
+        current = parent;
+      }
+
+      if (!roots.has(current.pid)) {
+        roots.set(current.pid, { pid: current.pid, cpu: 0, mem: 0, comm: current.comm });
+      }
+      roots.get(current.pid)[metricKey] += proc[metricKey];
+    }
+
+    const topProcesses = Array.from(roots.values())
+      .sort((a, b) => b[metricKey] - a[metricKey])
+      .slice(0, 3);
+
+    const details = [];
+    for (const proc of topProcesses) {
+      const metricValue = Number(proc[metricKey]).toFixed(1);
+      try {
+        const cwd = await readlink(`/proc/${proc.pid}/cwd`);
+        details.push(`PID: ${proc.pid} | 程序: ${proc.comm} | ${metricLabel}: ${metricValue}% | 目录: ${cwd}`);
+      } catch {
+        details.push(`PID: ${proc.pid} | 程序: ${proc.comm} | ${metricLabel}: ${metricValue}% | 目录: (未知)`);
+      }
+    }
+
+    return details;
+  } catch {
+    return [];
+  }
 }
 
 async function collectCpuTemperature() {
@@ -129,11 +366,11 @@ async function collectCpuTemperature() {
   return null;
 }
 
-export async function collectSystemMetrics() {
+export async function collectSystemMetrics(options = {}) {
   const totalMem = os.totalmem();
   const freeMem = os.freemem();
   const usedMem = totalMem - freeMem;
-  const cpuPct = getCpuUsageCached();
+  const cpuPct = options.periodAverage ? getCpuUsagePeriodAverage() : getCpuUsageCached();
   const cpuTemp = await collectCpuTemperature();
   const load = os.loadavg();
   const coreCount = Math.max(os.cpus().length, 1);
@@ -177,6 +414,14 @@ export async function collectFilesystemMetrics(runtimeConfig) {
 }
 
 const directoryCache = new Map();
+
+function normalizeMountPath(mountPath) {
+  if (mountPath === "/") {
+    return "/";
+  }
+
+  return mountPath.replace(/\/+$/, "");
+}
 
 export async function collectDirectoryMetrics(runtimeConfig) {
   const directoriesConfig = Array.isArray(runtimeConfig.directories) ? runtimeConfig.directories : [];
@@ -300,49 +545,35 @@ export async function collectDirectoryMetrics(runtimeConfig) {
   return results;
 }
 
-export async function collectGpuMetrics() {
+export function resetDirectoryScanTimersForMount(mountPath) {
+  const normalizedMountPath = normalizeMountPath(mountPath);
+  if (!normalizedMountPath) {
+    return;
+  }
+
+  for (const [dirPath, cached] of directoryCache.entries()) {
+    if (
+      normalizedMountPath === "/" ||
+      dirPath === normalizedMountPath ||
+      dirPath.startsWith(`${normalizedMountPath}/`)
+    ) {
+      cached.lastScannedAt = 0;
+    }
+  }
+}
+
+export async function collectGpuMetrics(options = {}) {
+  if (options.periodAverage) {
+    return gpuSampler.consumeAverageSnapshot();
+  }
+
+  const latest = gpuSampler.getLatestSnapshot();
+  if (latest.available || latest.devices.length > 0) {
+    return latest;
+  }
+
   try {
-    const { stdout } = await execFileAsync("nvidia-smi", [
-      "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
-      "--format=csv,noheader,nounits"
-    ]);
-
-    const devices = stdout
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => line.split(",").map((part) => part.trim()))
-      .map(([index, name, util, memoryUsed, memoryTotal, temperature]) => ({
-        index: Number(index),
-        name,
-        utilizationPct: Number(util),
-        memoryUsedMiB: Number(memoryUsed),
-        memoryTotalMiB: Number(memoryTotal),
-        memoryPct:
-          Number(memoryTotal) > 0
-            ? Number(((Number(memoryUsed) / Number(memoryTotal)) * 100).toFixed(2))
-            : 0,
-        temperatureC: Number(temperature)
-      }));
-
-    const utilizationPct = devices.length
-      ? Number((devices.reduce((sum, d) => sum + d.utilizationPct, 0) / devices.length).toFixed(2))
-      : null;
-    
-    // 显存合计值：所有GPU总显存使用量 / 总容量 * 100
-    const totalMemoryUsedMiB = devices.reduce((sum, d) => sum + d.memoryUsedMiB, 0);
-    const totalMemoryMiB = devices.reduce((sum, d) => sum + d.memoryTotalMiB, 0);
-    const memoryPct = totalMemoryMiB > 0
-      ? Number(((totalMemoryUsedMiB / totalMemoryMiB) * 100).toFixed(2))
-      : null;
-
-    return {
-      available: devices.length > 0,
-      devices,
-      summary: {
-        utilizationPct,
-        memoryPct
-      }
-    };
+    return await queryGpuSnapshot();
   } catch {
     return {
       available: false,
@@ -359,78 +590,56 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
   const thresholds = runtimeConfig.thresholds ?? {};
   const alerts = [];
 
-  if (report.system && report.system.cpu.pct >= thresholds.cpuWarn) {
-    alerts.push({
-      id: "cpu",
-      alertKey: "cpu",
-      source: "cpu",
-      status: "active",
-      level: chooseAlertLevel(report.system.cpu.pct, thresholds.cpuWarn),
-      currentValue: report.system.cpu.pct,
-      threshold: thresholds.cpuWarn,
-      message: `CPU 使用率达到 ${report.system.cpu.pct.toFixed(1)}%`,
-      detectedAt: report.collectedAt
-    });
-  }
+  const cpuValue = report.system?.cpu?.pct;
+  const cpuThreshold = thresholds.cpuWarn;
+  const cpuCriticalThreshold = thresholds.cpuCritical;
+  const cpuAlertDurationMin = thresholds.cpuAlertDurationMin ?? 30;
+  const cpuAlertDurationMs = Math.max(cpuAlertDurationMin, 0) * 60 * 1000;
 
-  if (report.system && report.system.memory.pct >= thresholds.memWarn) {
-    let extraMsg = "";
-    let alertDetails = [];
-    try {
-      const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,%mem,comm"]);
-      const lines = stdout.trim().split(/\r?\n/).slice(1);
-      const procMap = new Map();
-      
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const parts = line.trim().split(/\s+/);
-        procMap.set(parts[0], {
-          pid: parts[0],
-          ppid: parts[1],
-          mem: parseFloat(parts[2]) || 0,
-          comm: parts.slice(3).join(" ")
+  if (Number.isFinite(cpuValue) && Number.isFinite(cpuThreshold)) {
+    const cpuState = alertProgress.get("cpu") ?? { since: null };
+
+    if (cpuValue >= cpuThreshold) {
+      const collectedAt = new Date(report.collectedAt ?? new Date().toISOString()).getTime();
+      if (!cpuState.since) {
+        cpuState.since = collectedAt;
+      }
+
+      if (collectedAt - cpuState.since >= cpuAlertDurationMs) {
+        const alertDetails = await collectTopProcessDetails("cpu", "CPU");
+        alerts.push({
+          id: "cpu",
+          alertKey: "cpu",
+          source: "cpu",
+          status: "active",
+          level: chooseAlertLevel(cpuValue, cpuThreshold, cpuCriticalThreshold),
+          currentValue: cpuValue,
+          threshold: cpuThreshold,
+          message: `CPU 使用率连续 ${cpuAlertDurationMin} 分钟达到 ${cpuValue.toFixed(1)}%`,
+          alertDetails: alertDetails.length ? alertDetails : null,
+          detectedAt: new Date(cpuState.since + cpuAlertDurationMs).toISOString()
         });
       }
 
-      const roots = new Map();
-      const ignoreNames = new Set(['bash', 'zsh', 'sh', 'dash', 'tmux', 'tmux: server', 'sshd', 'systemd', 'init']);
+      alertProgress.set("cpu", cpuState);
+    } else {
+      alertProgress.delete("cpu");
+    }
+  }
 
-      for (const p of procMap.values()) {
-        let curr = p;
-        while (procMap.has(curr.ppid)) {
-          const parent = procMap.get(curr.ppid);
-          if (parent.pid === "1" || parent.pid === "2") break;
-          if (ignoreNames.has(parent.comm)) break;
-          curr = parent;
-        }
-        if (!roots.has(curr.pid)) {
-          roots.set(curr.pid, { pid: curr.pid, mem: 0, comm: curr.comm });
-        }
-        roots.get(curr.pid).mem += p.mem;
-      }
-      
-      const topPids = Array.from(roots.values())
-        .sort((a, b) => b.mem - a.mem)
-        .slice(0, 3)
-        .map(g => ({ pid: g.pid, mem: g.mem.toFixed(1), comm: g.comm }));
-      
-      const fs = await import("node:fs/promises");
-      for (const p of topPids) {
-        try {
-          const cwd = await fs.readlink(`/proc/${p.pid}/cwd`);
-          alertDetails.push(`PID: ${p.pid} | 程序: ${p.comm} | 内存: ${p.mem}% | 目录: ${cwd}`);
-        } catch {
-          alertDetails.push(`PID: ${p.pid} | 程序: ${p.comm} | 内存: ${p.mem}% | 目录: (未知)`);
-        }
-      }
-    } catch (e) {}
+  if (
+    Number.isFinite(report.system?.memory?.pct) &&
+    Number.isFinite(thresholds.memWarn) &&
+    report.system.memory.pct >= thresholds.memWarn
+  ) {
+    const alertDetails = await collectTopProcessDetails("mem", "内存");
 
     alerts.push({
       id: "memory",
       alertKey: "memory",
       source: "memory",
       status: "active",
-      level: chooseAlertLevel(report.system.memory.pct, thresholds.memWarn),
+      level: chooseAlertLevel(report.system.memory.pct, thresholds.memWarn, thresholds.memCritical),
       currentValue: report.system.memory.pct,
       threshold: thresholds.memWarn,
       message: `内存使用率达到 ${report.system.memory.pct.toFixed(1)}%`,
@@ -446,8 +655,9 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
       source: "load",
       status: "active",
       level: chooseAlertLevel(
-        report.system.load.perCore * 100,
-        thresholds.load1PerCoreWarn * 100
+        report.system.load.perCore,
+        thresholds.load1PerCoreWarn,
+        thresholds.load1PerCoreCritical
       ),
       currentValue: report.system.load.perCore,
       threshold: thresholds.load1PerCoreWarn,
@@ -464,7 +674,7 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
         alertKey: `filesystem:${filesystem.mount}`,
         source: `filesystem:${filesystem.mount}`,
         status: "active",
-        level: chooseAlertLevel(filesystem.usedPct, thresholds.diskWarn),
+        level: chooseAlertLevel(filesystem.usedPct, thresholds.diskWarn, thresholds.diskCritical),
         currentValue: filesystem.usedPct,
         threshold: thresholds.diskWarn,
         message: `挂载点 ${filesystem.mount} 使用率达到 ${filesystem.usedPct.toFixed(1)}%`,
@@ -489,7 +699,7 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
         alertKey: `directory:${directory.key}`,
         source: `directory:${directory.path}`,
         status: "active",
-        level: chooseAlertLevel(currentGb, warnGB),
+        level: chooseAlertLevel(currentGb, warnGB, directory.criticalGB),
         currentValue: Number(currentGb.toFixed(2)),
         threshold: warnGB,
         message: `目录 ${directory.path} 占用达到 ${currentGb.toFixed(2)} GB`,
@@ -508,7 +718,7 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
       alertKey: "gpu",
       source: "gpu",
       status: "active",
-      level: chooseAlertLevel(report.gpu.summary.utilizationPct, thresholds.gpuWarn),
+      level: chooseAlertLevel(report.gpu.summary.utilizationPct, thresholds.gpuWarn, thresholds.gpuCritical),
       currentValue: report.gpu.summary.utilizationPct,
       threshold: thresholds.gpuWarn,
       message: `GPU 使用率达到 ${report.gpu.summary.utilizationPct.toFixed(1)}%`,
@@ -517,4 +727,31 @@ export async function buildCurrentAlerts(report, runtimeConfig) {
   }
 
   return alerts;
+}
+
+/**
+ * 导出 alertProgress 的序列化数据（用于持久化）
+ * @returns {Object} 可以被JSON.stringify的对象
+ */
+export function exportAlertProgressState() {
+  const state = {};
+  for (const [key, value] of alertProgress.entries()) {
+    state[key] = value;
+  }
+  return state;
+}
+
+/**
+ * 从序列化数据恢复 alertProgress（用于进程启动时恢复状态）
+ * @param {Object} data - 之前导出的序列化数据
+ */
+export function restoreAlertProgressState(data) {
+  if (!data || typeof data !== 'object') {
+    return;
+  }
+  for (const [key, value] of Object.entries(data)) {
+    if (value && typeof value === 'object' && typeof value.since === 'number') {
+      alertProgress.set(key, value);
+    }
+  }
 }

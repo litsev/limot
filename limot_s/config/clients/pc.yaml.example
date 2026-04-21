@@ -6,6 +6,8 @@ enabled: true
 thresholds:
   # CPU使用率警告阈值（%）
   cpuWarn: 90
+  # CPU使用率需要连续达到阈值的时长（分钟）
+  cpuAlertDurationMin: 30
   # 内存使用率警告阈值（%）
   memWarn: 90
   # 磁盘使用率警告阈值（%）

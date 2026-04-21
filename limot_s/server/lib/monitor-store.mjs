@@ -17,8 +17,36 @@ export class MonitorStore {
       (alert) => alert.status === "resolved"
     );
     
-    const oldAlertIds = new Set(oldAlerts.map(a => a.id));
-    const newAlerts = activeAlerts.filter(a => !oldAlertIds.has(a.id));
+    const oldAlertMap = new Map(oldAlerts.map((alert) => [alert.id, alert]));
+    const newAlerts = [];
+    const upgradedAlerts = [];
+    const downgradedAlerts = [];
+
+    const levelRank = { warn: 1, critical: 2 };
+
+    for (const alert of activeAlerts) {
+      const previousAlert = oldAlertMap.get(alert.id);
+      if (!previousAlert) {
+        newAlerts.push(alert);
+        continue;
+      }
+
+      const previousRank = levelRank[previousAlert.level] ?? 0;
+      const currentRank = levelRank[alert.level] ?? 0;
+      if (previousRank < currentRank) {
+        upgradedAlerts.push({
+          ...alert,
+          previousLevel: previousAlert.level,
+          transition: "upgrade"
+        });
+      } else if (previousRank > currentRank) {
+        downgradedAlerts.push({
+          ...alert,
+          previousLevel: previousAlert.level,
+          transition: "downgrade"
+        });
+      }
+    }
 
     // 合并目录状态：保留未被本次上报覆盖的历史目录最新数据
     const mergedDirectoriesMap = new Map((current.directories ?? []).map(d => [d.key, d]));
@@ -42,7 +70,7 @@ export class MonitorStore {
     this.broadcast("snapshot", this.getServerSummaries());
     
     // 返回已解决和新的告警供caller处理
-    return { resolvedAlerts, newAlerts };
+    return { resolvedAlerts, newAlerts, upgradedAlerts, downgradedAlerts };
   }
 
   upsertHeartbeat(clientId, heartbeat) {
@@ -73,7 +101,7 @@ export class MonitorStore {
     const oldCount = current.gpuCount;
     if (oldCount !== undefined && gpuCount < oldCount) {
       if (wechatNotifier) {
-        wechatNotifier.notify(`🚨 严重告警 [${clientId}]: GPU通信异常！已知数量从 ${oldCount} 减少至 ${gpuCount}`);
+        wechatNotifier.notify(`🚨 严重掉卡告警 [${clientId}]: GPU异常！数量从 ${oldCount} 减少至 ${gpuCount}`);
       }
     }
     this.latest.set(clientId, {

@@ -13,6 +13,7 @@ import {
 } from "./lib/http-utils.mjs";
 import { MonitorStore } from "./lib/monitor-store.mjs";
 import { WechatNotifier } from "./lib/wechat-notifier.mjs";
+import * as logger from "./lib/logger.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB_ROOT = resolve(PROJECT_ROOT, "web");
@@ -30,6 +31,9 @@ const monitorStore = new MonitorStore(configStore);
 
 const wechatNotifier = new WechatNotifier(configStore, monitorStore);
 wechatNotifier.start();
+
+const pendingDirectoryComparisonNotices = new Map();
+const DIRECTORY_NOTICE_TTL_MS = 10 * 60 * 1000;
 
 configStore.onReload(async () => {
   monitorStore.broadcast("config", configStore.getPublicConfig());
@@ -68,9 +72,102 @@ async function handleAgentRequest(req, res, handler) {
       ...result
     });
   } catch (error) {
-    console.error("[agent] request failed:", error);
+    logger.error("agent", "request failed: " + error.message);
     sendJson(res, 400, { error: error.message });
   }
+}
+
+function buildAlertMessage(alert, clientId, prefix) {
+  let text = `${prefix} [${clientId}]: ${alert.message} (${alert.previousLevel} -> ${alert.level})`;
+  if (alert.alertDetails && Array.isArray(alert.alertDetails) && alert.alertDetails.length > 0) {
+    text += `\n🔍 异常进程:\n` + alert.alertDetails.map((detail) => `  - ${detail}`).join("\n");
+  }
+  return text;
+}
+
+function toGiB(bytes) {
+  return Number(bytes) / (1024 ** 3);
+}
+
+function hasFilesystemAlertChanges({ resolvedAlerts, newAlerts, upgradedAlerts, downgradedAlerts }) {
+  const allAlerts = [
+    ...(resolvedAlerts ?? []),
+    ...(newAlerts ?? []),
+    ...(upgradedAlerts ?? []),
+    ...(downgradedAlerts ?? [])
+  ];
+  return allAlerts.some((alert) => typeof alert?.id === "string" && alert.id.startsWith("filesystem:"));
+}
+
+function markPendingDirectoryComparisonNotice(clientId) {
+  pendingDirectoryComparisonNotices.set(clientId, {
+    triggeredAt: Date.now()
+  });
+}
+
+function hasPendingDirectoryComparisonNotice(clientId) {
+  const pending = pendingDirectoryComparisonNotices.get(clientId);
+  if (!pending) {
+    return false;
+  }
+
+  if (Date.now() - pending.triggeredAt > DIRECTORY_NOTICE_TTL_MS) {
+    pendingDirectoryComparisonNotices.delete(clientId);
+    return false;
+  }
+
+  return true;
+}
+
+async function notifyDirectoryComparison(clientId, directories) {
+  const validDirectories = (directories ?? []).filter(
+    (directory) => directory?.key && Number.isFinite(directory.sizeBytes)
+  );
+  if (validDirectories.length === 0) {
+    return false;
+  }
+
+  const uniqueKeys = Array.from(new Set(validDirectories.map((directory) => directory.key)));
+  const comparisons = await sqliteStore.queryDirectoryDailyComparisons(clientId, uniqueKeys);
+  const lines = [];
+  let index = 1;
+
+  for (const directory of validDirectories) {
+    const comparison = comparisons.get(directory.key);
+    if (!comparison?.old || !comparison?.latest) {
+      continue;
+    }
+
+    const deltaBytes = Number(comparison.latest.sizeBytes) - Number(comparison.old.sizeBytes);
+    if (deltaBytes === 0) {
+      continue;
+    }
+
+    const previousGiB = toGiB(comparison.old.sizeBytes);
+    const currentGiB = toGiB(comparison.latest.sizeBytes);
+    const deltaGiB = toGiB(deltaBytes);
+
+    let ratioText = "N/A";
+    if (previousGiB > 0) {
+      const ratio = ((deltaGiB / previousGiB) * 100).toFixed(2);
+      ratioText = `${Number(ratio) >= 0 ? "+" : ""}${ratio}%`;
+    }
+
+    lines.push(
+      `${index}. ${directory.path} (${previousGiB.toFixed(2)}G -> ${currentGiB.toFixed(2)}G, ${deltaGiB >= 0 ? "+" : ""}${deltaGiB.toFixed(2)}G, ${ratioText})`,
+      ""
+    );
+    index += 1;
+  }
+
+  if (lines.length === 0) {
+    return false;
+  }
+
+  await wechatNotifier.notify(
+    `📁 目录占用变化（1天） [${clientId}]\n` + lines.join("\n").trim()
+  );
+  return true;
 }
 
 async function requestHandler(req, res) {
@@ -174,6 +271,22 @@ async function requestHandler(req, res) {
     return;
   }
 
+  const userDirectoryUsageHistoryMatch = getRouteMatch(
+    pathname,
+    /^\/api\/servers\/([^/]+)\/history\/user-directory-usage$/
+  );
+  if (req.method === "GET" && userDirectoryUsageHistoryMatch) {
+    const [clientId] = userDirectoryUsageHistoryMatch.slice(1);
+    const range = parseTimeRange(searchParams);
+    sendJson(res, 200, {
+      rows: await sqliteStore.queryUserDirectoryUsageHistory(clientId, {
+        ...range,
+        owner: searchParams.get("owner")
+      })
+    });
+    return;
+  }
+
   const alertsMatch = getRouteMatch(pathname, /^\/api\/servers\/([^/]+)\/alerts$/);
   if (req.method === "GET" && alertsMatch) {
     const [clientId] = alertsMatch.slice(1);
@@ -203,11 +316,18 @@ async function requestHandler(req, res) {
 
   if (req.method === "POST" && pathname === "/api/agent/report_directory") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
-      const { resolvedAlerts, newAlerts } = monitorStore.upsertReport(clientId, payload);
+      const { resolvedAlerts, newAlerts, upgradedAlerts, downgradedAlerts } = monitorStore.upsertReport(clientId, payload);
       await sqliteStore.appendDirectoryReport(clientId, payload);
+      await sqliteStore.upsertAlerts(clientId, payload.collectedAt, payload.currentAlerts ?? []);
+
+      if (hasPendingDirectoryComparisonNotice(clientId)) {
+        const notified = await notifyDirectoryComparison(clientId, payload.directories ?? []);
+        if (notified) {
+          pendingDirectoryComparisonNotices.delete(clientId);
+        }
+      }
       
       if (newAlerts && newAlerts.length > 0) {
-        await sqliteStore.appendAlerts(clientId, payload.collectedAt, newAlerts);
         const text = newAlerts.map(a => {
           const icon = a.level === 'critical' ? '🚨 严重' : '⚠️ 普通';
           let str = `${icon}告警 [${clientId}]: ${a.message} (当前: ${a.currentValue})`;
@@ -218,9 +338,24 @@ async function requestHandler(req, res) {
         }).join("\n\n");
         wechatNotifier.notify(text);
       }
+
+      if (upgradedAlerts && upgradedAlerts.length > 0) {
+        const text = upgradedAlerts.map((alert) => {
+          const icon = alert.level === "critical" ? "🚨 严重" : "⚠️ 普通";
+          return buildAlertMessage(alert, clientId, `${icon}告警升级`);
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+
+      if (downgradedAlerts && downgradedAlerts.length > 0) {
+        const text = downgradedAlerts.map((alert) => {
+          const icon = alert.level === "critical" ? "🚨 严重" : "⚠️ 普通";
+          return buildAlertMessage(alert, clientId, `${icon}告警降级`);
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
       
       if (resolvedAlerts.length > 0) {
-        await sqliteStore.appendAlerts(clientId, payload.collectedAt, resolvedAlerts);
         const text = resolvedAlerts.map(a => `✅ 告警恢复 [${clientId}]: ${a.message}`).join("\n");
         wechatNotifier.notify(text);
       }
@@ -233,12 +368,12 @@ async function requestHandler(req, res) {
 
   if (req.method === "POST" && pathname === "/api/agent/report") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
-      const { resolvedAlerts, newAlerts } = monitorStore.upsertReport(clientId, payload);
+      const { resolvedAlerts, newAlerts, upgradedAlerts, downgradedAlerts } = monitorStore.upsertReport(clientId, payload);
       // 先记录系统指标和活跃告警
       await sqliteStore.appendReport(clientId, payload);
+      await sqliteStore.upsertAlerts(clientId, payload.collectedAt, payload.currentAlerts ?? []);
       
       if (newAlerts && newAlerts.length > 0) {
-        await sqliteStore.appendAlerts(clientId, payload.collectedAt, newAlerts);
         const text = newAlerts.map(a => {
           const icon = a.level === 'critical' ? '🚨 严重' : '⚠️ 普通';
           let str = `${icon}告警 [${clientId}]: ${a.message} (当前: ${a.currentValue})`;
@@ -249,12 +384,31 @@ async function requestHandler(req, res) {
         }).join("\n\n");
         wechatNotifier.notify(text);
       }
+
+      if (upgradedAlerts && upgradedAlerts.length > 0) {
+        const text = upgradedAlerts.map((alert) => {
+          const icon = alert.level === "critical" ? "🚨 严重" : "⚠️ 普通";
+          return buildAlertMessage(alert, clientId, `${icon}告警升级`);
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+
+      if (downgradedAlerts && downgradedAlerts.length > 0) {
+        const text = downgradedAlerts.map((alert) => {
+          const icon = alert.level === "critical" ? "🚨 严重" : "⚠️ 普通";
+          return buildAlertMessage(alert, clientId, `${icon}告警降级`);
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
       
       // 再记录已解决的历史告警
       if (resolvedAlerts.length > 0) {
-        await sqliteStore.appendAlerts(clientId, payload.collectedAt, resolvedAlerts);
         const text = resolvedAlerts.map(a => `✅ 告警恢复 [${clientId}]: ${a.message}`).join("\n");
         wechatNotifier.notify(text);
+      }
+
+      if (hasFilesystemAlertChanges({ resolvedAlerts, newAlerts, upgradedAlerts, downgradedAlerts })) {
+        markPendingDirectoryComparisonNotice(clientId);
       }
       return {
         acceptedAt: new Date().toISOString()
@@ -300,7 +454,7 @@ function scheduleDailyCompression() {
     try {
       await sqliteStore.compressYesterdayData();
     } catch (e) {
-      console.error("[crond] Error running daily compression:", e);
+      logger.error("crond", "Error running daily compression: " + e.message);
     }
     // Reschedule for next day
     scheduleDailyCompression();
@@ -309,7 +463,5 @@ function scheduleDailyCompression() {
 scheduleDailyCompression();
 
 server.listen(serverConfig.port, serverConfig.host, () => {
-  console.log(
-    `[server] limot monitor listening on http://${serverConfig.host}:${serverConfig.port}`
-  );
+  logger.info("server", `limot monitor listening on http://${serverConfig.host}:${serverConfig.port}`);
 });

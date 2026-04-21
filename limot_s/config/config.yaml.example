@@ -20,5 +20,34 @@ defaults:
   heartbeatIntervalSec: 10
   # 单次上报最大数据条数
   reportBatchMax: 50
+  # 默认告警阈值
+  thresholds:
+    # CPU使用率告警阈值（%）
+    cpuWarn: 90
+    # CPU使用率严重告警阈值（%）
+    cpuCritical: 99
+    # CPU使用率需要连续达到阈值的时长（分钟）
+    cpuAlertDurationMin: 30
+    # 内存使用率告警阈值（%）
+    memWarn: 90
+    # 内存使用率严重告警阈值（%）
+    memCritical: 95
+    # 磁盘使用率告警阈值（%）
+    diskWarn: 85
+    # 磁盘使用率严重告警阈值（%）
+    diskCritical: 95
+    # 单核负载告警阈值
+    load1PerCoreWarn: 5
+    # 单核负载严重告警阈值
+    load1PerCoreCritical: 10
+    # GPU使用率告警阈值（%）
+    gpuWarn: 95
+    # GPU使用率严重告警阈值（%）
+    gpuCritical: 99
   # 默认的目录空间警告阈值（GB）
   warnGB: 500
+# 微信告警机器人配置
+wechat:
+  enabled: true
+  # 微信订阅者列表（用户ID，非微信号）
+  subscribers:

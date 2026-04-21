@@ -1,12 +1,14 @@
 import os from "node:os";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 
-import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics, startCpuSampler, stopCpuSampler } from "./lib/collectors.mjs";
+import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics, startCpuSampler, stopCpuSampler, startGpuSampler, stopGpuSampler, exportAlertProgressState, restoreAlertProgressState, resetDirectoryScanTimersForMount } from "./lib/collectors.mjs";
 import { postJson } from "./lib/http-client.mjs";
 import { enqueueOutbox, flushOutbox, outboxCount } from "./lib/outbox.mjs";
-import { appendLog, readJsonFile, readConfigFile, sleep, writeJsonFile } from "./lib/utils.mjs";
+import { appendLog, readJsonFile, readConfigFile, sleep, writeJsonFile, getLocalTimeString } from "./lib/utils.mjs";
 
 const AGENT_VERSION = "0.1.0";
+const STARTUP_FILTER_WINDOW_MS = 30 * 1000;
 const DEFAULT_BOOTSTRAP_PATH = resolve(
   new URL("../config.yaml", import.meta.url).pathname
 );
@@ -22,10 +24,12 @@ const logsDir = resolve(new URL("../logs", import.meta.url).pathname);
 const runtimeConfigCachePath = resolve(cacheDir, "runtime-config.json");
 const outboxPath = resolve(cacheDir, "outbox.json");
 const alertStatePath = resolve(cacheDir, "alerts-state.json");
+const alertProgressPath = resolve(cacheDir, "alert-progress.json");
 const logPath = resolve(logsDir, "agent.log");
 
 let stopping = false;
 let lastError = null;
+const processStartedAt = Date.now();
 const previousAlertEntries = (await readJsonFile(alertStatePath, [])) ?? [];
 let previousBaseAlerts = new Map();
 let previousDirectoryAlerts = new Map();
@@ -40,6 +44,13 @@ for (const entry of previousAlertEntries) {
   }
 }
 
+// 恢复 alertProgress 状态（用于CPU等需要连续检测的告警）
+const cachedAlertProgress = (await readJsonFile(alertProgressPath, {})) ?? {};
+if (Object.keys(cachedAlertProgress).length > 0) {
+  console.log(`[${getLocalTimeString()}] [client] restoring alert progress from cache: ${JSON.stringify(cachedAlertProgress)}`);
+}
+restoreAlertProgressState(cachedAlertProgress);
+
 const cachedRuntimeConfig =
   (await readJsonFile(runtimeConfigCachePath, null)) ?? bootstrap.fallbackRuntimeConfig;
 let runtimeConfig = cachedRuntimeConfig;
@@ -52,7 +63,7 @@ process.on("SIGTERM", () => {
 });
 
 async function log(message) {
-  console.log(`[client] ${message}`);
+  console.log(`[${getLocalTimeString()}] [client] ${message}`);
   await appendLog(logPath, message);
 }
 
@@ -68,16 +79,60 @@ async function agentRequest(route, payload) {
 }
 
 function diffAlertEvents(currentAlerts, scope) {
-  const currentMap = new Map(currentAlerts.map((alert) => [alert.id, alert]));
-  const newlyResolved = [];
   const previousMap = scope === 'directory' ? previousDirectoryAlerts : previousBaseAlerts;
+  const currentMap = new Map(
+    currentAlerts.map((alert) => {
+      const previousAlert = previousMap.get(alert.id);
+      const recordId = previousAlert?.recordId ?? randomUUID();
+      const detectedAt = previousAlert?.detectedAt ?? alert.detectedAt ?? new Date().toISOString();
+      return [
+        alert.id,
+        {
+          ...alert,
+          recordId,
+          detectedAt
+        }
+      ];
+    })
+  );
+  const newlyResolved = [];
+
+  if (scope === "base") {
+    const filesystemMountsToReset = new Set();
+
+    for (const [alertId, currentAlert] of currentMap.entries()) {
+      if (!alertId.startsWith("filesystem:")) {
+        continue;
+      }
+
+      const previousAlert = previousMap.get(alertId);
+      if (!previousAlert || previousAlert.level !== currentAlert.level) {
+        filesystemMountsToReset.add(alertId.slice("filesystem:".length));
+      }
+    }
+
+    for (const [alertId] of previousMap.entries()) {
+      if (!alertId.startsWith("filesystem:")) {
+        continue;
+      }
+
+      if (!currentMap.has(alertId)) {
+        filesystemMountsToReset.add(alertId.slice("filesystem:".length));
+      }
+    }
+
+    for (const mountPath of filesystemMountsToReset) {
+      resetDirectoryScanTimersForMount(mountPath);
+    }
+  }
 
   // 已解决的告警（之前存在，现在不存在）
   for (const [alertId, previousAlert] of previousMap.entries()) {
     if (!currentMap.has(alertId)) {
       newlyResolved.push({
         ...previousAlert,
-        status: "resolved"
+        status: "resolved",
+        resolvedAt: new Date().toISOString()
       });
     }
   }
@@ -95,6 +150,10 @@ function diffAlertEvents(currentAlerts, scope) {
 async function persistAlertState() {
   const combined = [...previousBaseAlerts.values(), ...previousDirectoryAlerts.values()];
   await writeJsonFile(alertStatePath, combined);
+  
+  // 同时保存 alertProgress 状态（包含还在计时中但未触发的告警）
+  const alertProgressData = exportAlertProgressState();
+  await writeJsonFile(alertProgressPath, alertProgressData);
 }
 
 async function syncRuntimeConfig() {
@@ -121,8 +180,8 @@ async function syncRuntimeConfig() {
 async function buildReportPayload() {
   const config = getRuntimeConfig();
   const [system, gpu, filesystems] = await Promise.all([
-    collectSystemMetrics(),
-    collectGpuMetrics(),
+    collectSystemMetrics({ periodAverage: true }),
+    collectGpuMetrics({ periodAverage: true }),
     collectFilesystemMetrics(config)
   ]);
 
@@ -140,6 +199,23 @@ async function buildReportPayload() {
     gpu,
     filesystems,
   };
+
+  if (Date.now() - processStartedAt < STARTUP_FILTER_WINDOW_MS) {
+    if (Number(system?.cpu?.pct) === 0 && system?.cpu) {
+      delete system.cpu.pct;
+    }
+
+    if (Number(gpu?.summary?.utilizationPct) === 0 && gpu?.summary) {
+      delete gpu.summary.utilizationPct;
+      if (Array.isArray(gpu.devices)) {
+        for (const device of gpu.devices) {
+          if (Number(device?.utilizationPct) === 0) {
+            delete device.utilizationPct;
+          }
+        }
+      }
+    }
+  }
 
   const currentAlerts = await buildCurrentAlerts(report, config);
   const allAlerts = diffAlertEvents(currentAlerts, 'base');
@@ -264,6 +340,8 @@ await log(`server=${bootstrap.serverBaseUrl} clientId=${bootstrap.clientId}`);
 
 startCpuSampler();
 await log("CPU sampler started");
+startGpuSampler();
+await log("GPU sampler started");
 
 try {
   await syncRuntimeConfig();
@@ -277,5 +355,7 @@ try {
   await Promise.all([configLoop(), reportLoop(), directoryLoop(), heartbeatLoop()]);
 } finally {
   stopCpuSampler();
+  stopGpuSampler();
   await log("CPU sampler stopped");
+  await log("GPU sampler stopped");
 }

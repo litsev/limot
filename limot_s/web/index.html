@@ -120,7 +120,14 @@
                 <div>
                   <h2>{{ selectedServer.id }}</h2>
                 </div>
+
                 <div class="filters" style="align-items: center;">
+                  <el-button :type="chartToggleButtonType('system')" @click="toggleChartVisibility('system')">系统折线图</el-button>
+                  <el-button :type="chartToggleButtonType('filesystem')" @click="toggleChartVisibility('filesystem')">磁盘折线图</el-button>
+                  <el-button :type="chartToggleButtonType('directory')" @click="toggleChartVisibility('directory')">目录折线图</el-button>
+                  <el-button :type="chartToggleButtonType('userDirectory')" @click="toggleChartVisibility('userDirectory')">用户目录折线图</el-button>
+                  
+
                   <span style="font-size: 13px; color: var(--el-text-color-regular);">时间范围：</span>
                   <el-select v-model="hoursRange" size="small" @change="refreshSelectedServer" placeholder="请选择时间范围" style="width: 140px;">
                     <el-option label="最近 1 小时" :value="1"></el-option>
@@ -131,6 +138,10 @@
                     
                   </el-select>
                 </div>
+              </div>
+
+              <div class="filters" style="margin-bottom: 14px;">
+                
               </div>
 
               <div class="chart-card current-alerts-card" v-if="visibleAlerts.length > 0" style="margin-bottom: 20px; border: 1px solid var(--el-color-danger-light-8);">
@@ -168,39 +179,39 @@
                 </div>
               </div>
 
-              <div class="metric-strip">
-              </div>
-
-              <div class="chart-grid">
-                <div class="chart-card" v-if="selectedServer?.gpu?.available">
-                  <div class="chart-title">GPU 设备状态</div>
-                  <div class="gpu-list" :style="{'--gpu-cols': Math.min(selectedServer.gpu.devices.length, 3)}">
-                    <div v-for="device in selectedServer.gpu.devices" :key="device.index" class="gpu-card">
-                      <div class="gpu-card-header">
-                        <strong>GPU {{ device.index }}: {{ device.name }}</strong>
-                        <span class="gpu-temp">{{ device.temperatureC }}°C</span>
+              <div class="chart-card" v-if="selectedServer?.gpu?.available" style="margin-bottom: 20px;">
+                <div class="chart-title">GPU 设备状态</div>
+                <div class="gpu-list" :style="{'--gpu-cols': Math.min(selectedServer.gpu.devices.length, 3)}">
+                  <div v-for="device in selectedServer.gpu.devices" :key="device.index" class="gpu-card">
+                    <div class="gpu-card-header">
+                      <strong>GPU {{ device.index }}: {{ device.name }}</strong>
+                      <span class="gpu-temp">{{ device.temperatureC }}°C</span>
+                    </div>
+                    <div class="gpu-metrics">
+                      <div class="gpu-metric">
+                        <label>GPU 使用率</label>
+                        <div class="metric-bar">
+                          <div class="metric-fill" :style="{ width: device.utilizationPct + '%' }"></div>
+                        </div>
+                        <span>{{ device.utilizationPct }}%</span>
                       </div>
-                      <div class="gpu-metrics">
-                        <div class="gpu-metric">
-                          <label>GPU 使用率</label>
-                          <div class="metric-bar">
-                            <div class="metric-fill" :style="{ width: device.utilizationPct + '%' }"></div>
-                          </div>
-                          <span>{{ device.utilizationPct }}%</span>
+                      <div class="gpu-metric">
+                        <label>显存使用</label>
+                        <div class="metric-bar">
+                          <div class="metric-fill" :style="{ width: device.memoryPct + '%' }"></div>
                         </div>
-                        <div class="gpu-metric">
-                          <label>显存使用</label>
-                          <div class="metric-bar">
-                            <div class="metric-fill" :style="{ width: device.memoryPct + '%' }"></div>
-                          </div>
-                          <span>{{ formatBytes(device.memoryUsedMiB * 1024 * 1024) }} / {{ formatBytes(device.memoryTotalMiB * 1024 * 1024) }} ({{ device.memoryPct }}%)</span>
-                        </div>
+                        <span>{{ formatBytes(device.memoryUsedMiB * 1024 * 1024) }} / {{ formatBytes(device.memoryTotalMiB * 1024 * 1024) }} ({{ device.memoryPct }}%)</span>
                       </div>
                     </div>
                   </div>
                 </div>
+              </div>
 
-                <div class="chart-card" :class="{ 'is-fullscreen': fullscreenChart === 'system' }">
+              <div class="metric-strip">
+              </div>
+
+              <div class="chart-grid">
+                <div class="chart-card" v-if="chartVisibility.system" :class="{ 'is-fullscreen': fullscreenChart === 'system' }">
                   <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
                     <span>CPU / 内存 / 负载 / GPU / 显存</span>
                     <el-button size="small" type="primary" plain @click="toggleFullscreen('system')">
@@ -210,7 +221,17 @@
                   <div id="system-chart" class="chart"></div>
                 </div>
 
-                <div class="chart-card" :class="{ 'is-fullscreen': fullscreenChart === 'directory' }">
+                <div class="chart-card" v-if="chartVisibility.filesystem" :class="{ 'is-fullscreen': fullscreenChart === 'filesystem' }">
+                  <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>磁盘使用率</span>
+                    <el-button size="small" type="primary" plain @click="toggleFullscreen('filesystem')">
+                      {{ fullscreenChart === 'filesystem' ? '退出全屏' : '全屏放大' }}
+                    </el-button>
+                  </div>
+                  <div id="filesystem-chart" class="chart"></div>
+                </div>
+
+                <div class="chart-card" v-if="chartVisibility.directory" :class="{ 'is-fullscreen': fullscreenChart === 'directory' }">
                   <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
                     <span>目录大小折线图</span>
                     <div style="display: flex; gap: 8px;">
@@ -223,32 +244,113 @@
                   <div id="directory-chart" class="chart"></div>
                 </div>
 
-                <div class="chart-card" :class="{ 'is-fullscreen': fullscreenChart === 'filesystem' }">
-                  <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>磁盘使用率</span>
-                    <el-button size="small" type="primary" plain @click="toggleFullscreen('filesystem')">
-                      {{ fullscreenChart === 'filesystem' ? '退出全屏' : '全屏放大' }}
-                    </el-button>
+                <div class="chart-card">
+                  <div class="table-section">
+                    <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span>用户占用变化表</span>
+                      <el-select v-model="ownerUsageSortBy" size="small" style="width: 130px;">
+                        <el-option
+                          v-for="item in ownerUsageSortOptions"
+                          :key="item.value"
+                          :label="item.label"
+                          :value="item.value"
+                        ></el-option>
+                      </el-select>
+                    </div>
+                    <el-table :data="ownerUsageChangeRows" stripe table-layout="auto">
+                      <el-table-column prop="owner" label="用户"></el-table-column>
+                      <el-table-column prop="yesterdaySizeBytes" label="昨日占用">
+                        <template #default="scope">
+                          {{ formatBytes(scope.row.yesterdaySizeBytes) }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="dayDeltaBytes" label="日增量/变化率">
+                        <template #default="scope">
+                          {{ formatSignedSizeBytes(scope.row.dayDeltaBytes) }} / {{ formatSignedRate(scope.row.dayChangeRatePct) }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="weekSizeBytes" label="上周占用">
+                        <template #default="scope">
+                          {{ formatBytes(scope.row.weekSizeBytes) }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="weekDeltaBytes" label="周增量/变化率">
+                        <template #default="scope">
+                          {{ formatSignedSizeBytes(scope.row.weekDeltaBytes) }} / {{ formatSignedRate(scope.row.weekChangeRatePct) }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="monthSizeBytes" label="上月占用">
+                        <template #default="scope">
+                          {{ formatBytes(scope.row.monthSizeBytes) }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="monthDeltaBytes" label="月增量/变化率">
+                        <template #default="scope">
+                          {{ formatSignedSizeBytes(scope.row.monthDeltaBytes) }} / {{ formatSignedRate(scope.row.monthChangeRatePct) }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="latestSizeBytes" label="当前占用">
+                        <template #default="scope">
+                          {{ formatBytes(scope.row.latestSizeBytes) }}
+                        </template>
+                      </el-table-column>
+                    </el-table>
                   </div>
-                  <div id="filesystem-chart" class="chart"></div>
+                </div>
+
+                <div class="chart-card" v-if="chartVisibility.userDirectory">
+                  <div class="chart-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>用户占用折线图</span>
+                    <el-radio-group v-model="ownerUsageUnit" size="small">
+                      <el-radio-button
+                        v-for="item in ownerUsageUnitOptions"
+                        :key="item.value"
+                        :label="item.value"
+                      >
+                        {{ item.label }}
+                      </el-radio-button>
+                    </el-radio-group>
+                  </div>
+                  <div id="user-directory-chart" class="chart"></div>
                 </div>
 
                 <div class="chart-card">
                   <div class="table-section">
-                    <div class="chart-title">历史告警</div>
-                    <el-table :data="alertRows" height="280">
+                    <div class="chart-title">最近告警</div>
+                    <el-table :data="alertRows" height="280" stripe class="alert-history-table">
                       <el-table-column prop="ts" label="时间" min-width="170">
                         <template #default="scope">
                           {{ formatDateTime(scope.row.ts) }}
                         </template>
                       </el-table-column>
-                      <el-table-column prop="level" label="级别" width="90"></el-table-column>
-                      <el-table-column prop="status" label="状态" width="90"></el-table-column>
+                      <el-table-column prop="level" label="级别" width="124" align="center">
+                        <template #default="scope">
+                          <el-tag
+                            size="small"
+                            effect="light"
+                            :class="['alert-badge', getAlertLevelMeta(scope.row.level).className]"
+                          >
+                            {{ getAlertLevelMeta(scope.row.level).label }}
+                          </el-tag>
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="status" label="状态" width="110" align="center">
+                        <template #default="scope">
+                          <el-tag
+                            size="small"
+                            effect="light"
+                            :class="['alert-badge', getAlertStatusMeta(scope.row.status).className]"
+                          >
+                            {{ getAlertStatusMeta(scope.row.status).label }}
+                          </el-tag>
+                        </template>
+                      </el-table-column>
                       <el-table-column prop="source" label="来源" min-width="150"></el-table-column>
                       <el-table-column prop="message" label="消息" min-width="280"></el-table-column>
                     </el-table>
                   </div>
                 </div>
+
               </div>
 
               

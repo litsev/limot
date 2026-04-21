@@ -1,6 +1,7 @@
 import { WeixinBot } from '@pinixai/weixin-bot';
 import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
+import * as logger from './logger.mjs';
 
 export class WechatNotifier {
   constructor(configStore, monitorStore) {
@@ -19,10 +20,10 @@ export class WechatNotifier {
       for (const [uid, info] of Object.entries(this.tokensInfo)) {
         this.bot.contextTokens.set(uid, info.token);
       }
-      console.log(`[wechat] Loaded ${Object.keys(this.tokensInfo).length} persisted tokens.`);
+      logger.info('wechat', `Loaded ${Object.keys(this.tokensInfo).length} persisted tokens.`);
     } catch (e) {
       if (e.code !== 'ENOENT') {
-        console.error('[wechat] Failed to load tokens:', e.message);
+        logger.error('wechat', `Failed to load tokens: ${e.message}`);
       }
     }
   }
@@ -31,7 +32,7 @@ export class WechatNotifier {
     try {
       await writeFile(this.tokensFile, JSON.stringify(this.tokensInfo, null, 2), 'utf8');
     } catch (e) {
-      console.error('[wechat] Failed to save tokens:', e.message);
+      logger.error('wechat', `Failed to save tokens: ${e.message}`);
     }
   }
 
@@ -74,11 +75,11 @@ export class WechatNotifier {
       };
 
       await this.bot.login();
-      console.log('[wechat] Bot logged in successfully.');
+      logger.info('wechat', 'Bot logged in successfully.');
       
       this.bot.onMessage(async (msg) => {
         const text = (msg.text || '').trim();
-        console.log(`[wechat] 收到来自 ${msg.userId} 的消息: ${text}`);
+        logger.info('wechat', `收到来自 ${msg.userId} 的消息: ${text}`);
         
         if (text === 'userid' || text === 'id') {
           await this.bot.reply(msg, `你的 userId 为: ${msg.userId}\n请配置到 config.yaml 的 wechat.subscribers 中。`);
@@ -124,7 +125,7 @@ export class WechatNotifier {
       });
 
       this.bot.run().catch(err => {
-        console.error('[wechat] Bot run loop exited:', err);
+        logger.error('wechat', `Bot run loop exited: ${err.message}`);
       });
       this.started = true;
       this.startExpiryChecker();
@@ -138,12 +139,12 @@ export class WechatNotifier {
           try {
             await this.bot.send(uid, "🟢 LIMOT 监控服务端已成功启动/重启，通信通道已从持久化中恢复！");
           } catch (err) {
-            console.error(`[wechat] Failed to send startup message to ${uid}:`, err);
+            logger.error('wechat', `Failed to send startup message to ${uid}: ${err.message}`);
           }
         }
       }
     } catch (e) {
-      console.error('[wechat] Bot fail to start:', e);
+      logger.error('wechat', `Bot fail to start: ${e.message}`);
     }
   }
 
@@ -156,11 +157,11 @@ export class WechatNotifier {
 
     for (const userId of subs) {
       try {
-        console.log(`[wechat] Sending alert to ${userId}:\n${content}`);
+        logger.info('wechat', `Sending alert to ${userId}`);
         await this.bot.send(userId, content);
-        console.log(`[wechat] Successfully sent alert to ${userId}`);
+        logger.info('wechat', `Successfully sent alert to ${userId}`);
       } catch (e) {
-        console.error(`[wechat] Send fail to ${userId}:`, e);
+        logger.error('wechat', `Send fail to ${userId}: ${e.message}`);
       }
     }
   }

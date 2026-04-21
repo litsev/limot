@@ -2,6 +2,7 @@ import { watch } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, resolve, join } from "node:path";
 import YAML from "js-yaml";
+import * as logger from "./logger.mjs";
 
 const DEFAULT_CONFIG = {
   defaults: {
@@ -9,7 +10,20 @@ const DEFAULT_CONFIG = {
     directoryScanIntervalSec: 180,
     configPullIntervalSec: 60,
     heartbeatIntervalSec: 10,
-    reportBatchMax: 50
+    reportBatchMax: 50,
+    thresholds: {
+      cpuWarn: 85,
+      cpuCritical: 95,
+      cpuAlertDurationMin: 30,
+      memWarn: 90,
+      memCritical: 95,
+      diskWarn: 85,
+      diskCritical: 95,
+      load1PerCoreWarn: 0.8,
+      load1PerCoreCritical: 1.0,
+      gpuWarn: 95,
+      gpuCritical: 98
+    }
   },
   server: {
     host: "0.0.0.0",
@@ -79,7 +93,7 @@ export class ConfigStore {
       }
     } catch (err) {
       if (err.code !== "ENOENT") {
-        console.error("[config] Failed to load client configs:", err);
+        logger.error("config", `Failed to load client configs: ${err.message}`);
       }
     }
     
@@ -120,9 +134,9 @@ export class ConfigStore {
       this.watchTimer = setTimeout(async () => {
         try {
           await this.load("watch");
-          console.log("[config] monitoring.json reloaded from file change");
+          logger.info("config", "monitoring.json reloaded from file change");
         } catch (error) {
-          console.error("[config] reload failed:", error.message);
+          logger.error("config", `reload failed: ${error.message}`);
         }
       }, 250);
     });
@@ -167,11 +181,7 @@ export class ConfigStore {
         client.heartbeatIntervalSec ?? this.config.defaults.heartbeatIntervalSec,
       reportBatchMax: client.reportBatchMax ?? this.config.defaults.reportBatchMax,
       thresholds: {
-        cpuWarn: 85,
-        memWarn: 90,
-        diskWarn: 85,
-        load1PerCoreWarn: 0.8,
-        gpuWarn: 95,
+        ...(this.config.defaults.thresholds ?? {}),
         ...(client.thresholds ?? {})
       },
       filesystems: {

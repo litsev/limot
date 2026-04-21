@@ -1,4 +1,11 @@
 const { createApp, computed, nextTick, onMounted, reactive, ref, watch } = Vue;
+const CHART_VISIBILITY_STORAGE_KEY = "limot.chartVisibility.v1";
+const DEFAULT_CHART_VISIBILITY = {
+  system: true,
+  directory: false,
+  userDirectory: false,
+  filesystem: true
+};
 
 function createLineChart(domId) {
   const dom = document.getElementById(domId);
@@ -11,13 +18,15 @@ function formatBytes(value) {
   }
 
   const units = ["B", "KB", "MB", "GB"];
-  let number = Number(value);
+  const raw = Number(value);
+  const sign = raw < 0 ? "-" : "";
+  let number = Math.abs(raw);
   let index = 0;
   while (number >= 1024 && index < units.length - 1) {
     number /= 1024;
     index += 1;
   }
-  return `${number.toFixed(number >= 100 ? 0 : 1)} ${units[index]}`;
+  return `${sign}${number.toFixed(number >= 100 ? 0 : 1)} ${units[index]}`;
 }
 
 function baseChartOption(title, xAxisData, series, yAxis = [{}]) {
@@ -59,15 +68,43 @@ createApp({
     const selectedServerId = ref("");
     const hoursRange = ref(24);
     const directoryFilter = ref("");
+    const ownerUsageUnit = ref("day");
+    const ownerUsageSortBy = ref("week");
     const alertRows = ref([]);
     const hiddenAlertKeys = ref(new Set());
     const fullscreenChart = ref(null);
+    const chartVisibility = reactive({
+      ...DEFAULT_CHART_VISIBILITY
+    });
+
+    const alertLevelDict = {
+      warn: { label: "普通告警", className: "is-warn" },
+      critical: { label: "严重告警", className: "is-critical" }
+    };
+
+    const alertStatusDict = {
+      active: { label: "进行中", className: "is-active" },
+      resolved: { label: "已解决", className: "is-resolved" }
+    };
 
     const history = reactive({
       system: [],
       filesystem: [],
-      directory: []
+      directory: [],
+      userDirectoryUsage: []
     });
+
+    const ownerUsageUnitOptions = [
+      { label: "日", value: "day" },
+      { label: "周", value: "week" },
+      { label: "月", value: "month" }
+    ];
+
+    const ownerUsageSortOptions = [
+      { label: "按日增量", value: "day" },
+      { label: "按周增量", value: "week" },
+      { label: "按月增量", value: "month" }
+    ];
 
     const selectedServer = computed(() =>
       servers.value.find((server) => server.id === selectedServerId.value) ?? null
@@ -104,6 +141,24 @@ createApp({
     let systemChart = null;
     let filesystemChart = null;
     let directoryChart = null;
+    let userDirectoryChart = null;
+
+    function ensureChart(chartRef, domId) {
+      const dom = document.getElementById(domId);
+      if (!dom) {
+        if (chartRef) {
+          chartRef.dispose();
+        }
+        return null;
+      }
+
+      if (chartRef && chartRef.getDom() !== dom) {
+        chartRef.dispose();
+        chartRef = null;
+      }
+
+      return chartRef ?? echarts.init(dom);
+    }
 
     async function fetchJson(url, options) {
       // Create a URL object from the given relative or absolute URL, stripping origin credentials
@@ -140,8 +195,224 @@ createApp({
       return Number(value).toFixed(2);
     }
 
+    function formatSignedSizeBytes(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "--";
+      }
+      const sign = Number(value) > 0 ? "+" : "";
+      return `${sign}${formatBytes(value)}`;
+    }
+
+    function formatSignedRate(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "--";
+      }
+      const sign = Number(value) > 0 ? "+" : "";
+      return `${sign}${Number(value).toFixed(2)}%`;
+    }
+
+    function getPeriodMsByUnit(unit) {
+      if (unit === "week") {
+        return 7 * 24 * 60 * 60 * 1000;
+      }
+      if (unit === "month") {
+        return 30 * 24 * 60 * 60 * 1000;
+      }
+      return 24 * 60 * 60 * 1000;
+    }
+
+    function getHoursByUnit(unit) {
+      if (unit === "week") {
+        return 24 * 7;
+      }
+      if (unit === "month") {
+        return 24 * 30;
+      }
+      return 24;
+    }
+
+    const ownerUsageChangeRows = computed(() => {
+      const rows = history.userDirectoryUsage ?? [];
+      if (rows.length === 0) {
+        return [];
+      }
+
+      const byOwner = new Map();
+      for (const row of rows) {
+        if (!row?.owner || !Number.isFinite(Number(row?.sizeBytes))) {
+          continue;
+        }
+        if (!byOwner.has(row.owner)) {
+          byOwner.set(row.owner, []);
+        }
+        byOwner.get(row.owner).push({
+          ts: row.ts,
+          sizeBytes: Number(row.sizeBytes)
+        });
+      }
+
+      const result = [];
+
+      function buildPeriodChange(ownerRows, latest, periodMs) {
+        const latestMs = new Date(latest.ts).getTime();
+        if (!Number.isFinite(latestMs)) {
+          return null;
+        }
+
+        const targetMs = latestMs - periodMs;
+        let baseline = ownerRows.find((row) => new Date(row.ts).getTime() >= targetMs) ?? null;
+        if (!baseline) {
+          baseline = ownerRows[0] ?? null;
+        }
+        if (!baseline) {
+          return null;
+        }
+
+        const deltaBytes = latest.sizeBytes - baseline.sizeBytes;
+        const changeRatePct = baseline.sizeBytes > 0
+          ? (deltaBytes / baseline.sizeBytes) * 100
+          : null;
+
+        return {
+          baselineSizeBytes: baseline.sizeBytes,
+          deltaBytes,
+          changeRatePct
+        };
+      }
+
+      for (const [owner, ownerRows] of byOwner.entries()) {
+        ownerRows.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+        const latest = ownerRows[ownerRows.length - 1];
+        if (!latest) {
+          continue;
+        }
+
+        const dayChange = buildPeriodChange(ownerRows, latest, 24 * 60 * 60 * 1000);
+        const weekChange = buildPeriodChange(ownerRows, latest, 7 * 24 * 60 * 60 * 1000);
+        const monthChange = buildPeriodChange(ownerRows, latest, 30 * 24 * 60 * 60 * 1000);
+
+        if (!dayChange || !weekChange || !monthChange) {
+          continue;
+        }
+
+        result.push({
+          owner,
+          yesterdaySizeBytes: dayChange.baselineSizeBytes,
+          dayDeltaBytes: dayChange.deltaBytes,
+          dayChangeRatePct: dayChange.changeRatePct,
+          weekSizeBytes: weekChange.baselineSizeBytes,
+          weekDeltaBytes: weekChange.deltaBytes,
+          weekChangeRatePct: weekChange.changeRatePct,
+          monthSizeBytes: monthChange.baselineSizeBytes,
+          monthDeltaBytes: monthChange.deltaBytes,
+          monthChangeRatePct: monthChange.changeRatePct,
+          latestSizeBytes: latest.sizeBytes
+        });
+      }
+
+      const sortFieldMap = {
+        day: "dayDeltaBytes",
+        week: "weekDeltaBytes",
+        month: "monthDeltaBytes"
+      };
+      const sortField = sortFieldMap[ownerUsageSortBy.value] ?? "weekDeltaBytes";
+
+      return result.sort((a, b) => {
+        const aValue = Number(a[sortField]) || 0;
+        const bValue = Number(b[sortField]) || 0;
+        const aIsZero = aValue === 0;
+        const bIsZero = bValue === 0;
+
+        if (aIsZero && !bIsZero) {
+          return 1;
+        }
+        if (!aIsZero && bIsZero) {
+          return -1;
+        }
+
+        return bValue - aValue;
+      });
+    });
+
+    function getAlertLevelMeta(level) {
+      return alertLevelDict[level] ?? { label: level ?? "未知", className: "is-unknown" };
+    }
+
+    function getAlertStatusMeta(status) {
+      return alertStatusDict[status] ?? { label: status ?? "未知", className: "is-unknown" };
+    }
+
     async function loadConfig() {
       Object.assign(publicConfig, await fetchJson("/api/config"));
+    }
+
+    function loadChartVisibility() {
+      try {
+        const raw = localStorage.getItem(CHART_VISIBILITY_STORAGE_KEY);
+        if (!raw) {
+          return;
+        }
+        const saved = JSON.parse(raw);
+        chartVisibility.system = saved?.system ?? DEFAULT_CHART_VISIBILITY.system;
+        chartVisibility.directory = saved?.directory ?? DEFAULT_CHART_VISIBILITY.directory;
+        chartVisibility.userDirectory = saved?.userDirectory ?? DEFAULT_CHART_VISIBILITY.userDirectory;
+        chartVisibility.filesystem = saved?.filesystem ?? DEFAULT_CHART_VISIBILITY.filesystem;
+      } catch {
+        chartVisibility.system = DEFAULT_CHART_VISIBILITY.system;
+        chartVisibility.directory = DEFAULT_CHART_VISIBILITY.directory;
+        chartVisibility.userDirectory = DEFAULT_CHART_VISIBILITY.userDirectory;
+        chartVisibility.filesystem = DEFAULT_CHART_VISIBILITY.filesystem;
+      }
+    }
+
+    function persistChartVisibility() {
+      localStorage.setItem(CHART_VISIBILITY_STORAGE_KEY, JSON.stringify({
+        system: chartVisibility.system,
+        directory: chartVisibility.directory,
+        userDirectory: chartVisibility.userDirectory,
+        filesystem: chartVisibility.filesystem
+      }));
+    }
+
+    function toggleChartVisibility(chartKey) {
+      if (!(chartKey in chartVisibility)) {
+        return;
+      }
+
+      chartVisibility[chartKey] = !chartVisibility[chartKey];
+      persistChartVisibility();
+
+      if (chartVisibility[chartKey]) {
+        nextTick(() => {
+          if (chartKey === "system") {
+            renderSystemChart();
+          } else if (chartKey === "directory") {
+            renderDirectoryChart();
+          } else if (chartKey === "userDirectory") {
+            renderUserDirectoryChart();
+          } else if (chartKey === "filesystem") {
+            renderFilesystemChart();
+          }
+        });
+      } else {
+        if (chartKey === "system" && systemChart) {
+          systemChart.dispose();
+          systemChart = null;
+        } else if (chartKey === "directory" && directoryChart) {
+          directoryChart.dispose();
+          directoryChart = null;
+        } else if (chartKey === "userDirectory" && userDirectoryChart) {
+          userDirectoryChart.dispose();
+          userDirectoryChart = null;
+        } else if (chartKey === "filesystem" && filesystemChart) {
+          filesystemChart.dispose();
+          filesystemChart = null;
+        }
+      }
+    }
+
+    function chartToggleButtonType(chartKey) {
+      return chartVisibility[chartKey] ? "primary" : "info";
     }
 
     async function loadServers() {
@@ -232,6 +503,29 @@ createApp({
       renderDirectoryChart();
     }
 
+    async function loadUserDirectoryUsageHistory() {
+      if (!selectedServerId.value) {
+        history.userDirectoryUsage = [];
+        renderUserDirectoryChart();
+        return;
+      }
+
+      const hours = getHoursByUnit(ownerUsageUnit.value);
+      const to = new Date();
+      const from = new Date(to.getTime() - hours * 60 * 60 * 1000);
+      const params = new URLSearchParams({
+        from: from.toISOString(),
+        to: to.toISOString(),
+        points: "420"
+      });
+
+      const payload = await fetchJson(
+        `/api/servers/${selectedServerId.value}/history/user-directory-usage?${params}`
+      );
+      history.userDirectoryUsage = payload.rows ?? [];
+      renderUserDirectoryChart();
+    }
+
     async function toggleFullscreen(chartName) {
       const isEntering = fullscreenChart.value !== chartName;
       fullscreenChart.value = isEntering ? chartName : null;
@@ -290,14 +584,13 @@ createApp({
         loadSystemHistory(),
         loadFilesystemHistory(),
         loadDirectoryHistory(),
+        loadUserDirectoryUsageHistory(),
         loadAlerts()
       ]);
     }
 
     function renderSystemChart() {
-      if (!systemChart) {
-        systemChart = createLineChart("system-chart");
-      }
+      systemChart = ensureChart(systemChart, "system-chart");
       if (!systemChart) {
         return;
       }
@@ -351,9 +644,7 @@ createApp({
     }
 
     function renderFilesystemChart() {
-      if (!filesystemChart) {
-        filesystemChart = createLineChart("filesystem-chart");
-      }
+      filesystemChart = ensureChart(filesystemChart, "filesystem-chart");
       if (!filesystemChart) {
         return;
       }
@@ -427,9 +718,7 @@ createApp({
     }
 
     function renderDirectoryChart() {
-      if (!directoryChart) {
-        directoryChart = createLineChart("directory-chart");
-      }
+      directoryChart = ensureChart(directoryChart, "directory-chart");
       if (!directoryChart) {
         return;
       }
@@ -504,6 +793,60 @@ createApp({
       directoryChart.setOption(option, true);
     }
 
+    function renderUserDirectoryChart() {
+      userDirectoryChart = ensureChart(userDirectoryChart, "user-directory-chart");
+      if (!userDirectoryChart) {
+        return;
+      }
+
+      const rows = history.userDirectoryUsage ?? [];
+      const owners = [...new Set(rows.map((row) => row.owner))];
+      const tsSet = [...new Set(rows.map((row) => row.ts))].sort(
+        (a, b) => new Date(a).getTime() - new Date(b).getTime()
+      );
+      const xAxis = tsSet.map((ts) => formatDateTime(ts));
+
+      const series = owners.map((owner) => {
+        const ownerMap = new Map();
+        rows
+          .filter((row) => row.owner === owner)
+          .forEach((row) => {
+            ownerMap.set(row.ts, Number(row.sizeBytes) / (1024 ** 3));
+          });
+
+        let lastKnown = null;
+        const data = tsSet.map((ts) => {
+          if (ownerMap.has(ts)) {
+            lastKnown = ownerMap.get(ts);
+          }
+          return lastKnown;
+        });
+
+        return {
+          name: owner,
+          type: "line",
+          smooth: true,
+          connectNulls: true,
+          data,
+          tooltip: {
+            valueFormatter: (value) => value !== null ? `${Number(value).toFixed(2)} GB` : "--"
+          }
+        };
+      });
+
+      userDirectoryChart.setOption(
+        baseChartOption("用户目录占用", xAxis, series, [
+          {
+            type: "value",
+            axisLabel: {
+              formatter: "{value} GB"
+            }
+          }
+        ]),
+        true
+      );
+    }
+
     async function reloadConfig() {
       await fetchJson("/api/config/reload", {
         method: "POST"
@@ -554,12 +897,17 @@ createApp({
       await refreshSelectedServer();
     });
 
+    watch(ownerUsageUnit, async () => {
+      await loadUserDirectoryUsageHistory();
+    });
+
     window.addEventListener("resize", () => {
       systemChart?.resize();
       filesystemChart?.resize();
       if (directoryChart) {
         renderDirectoryChart(); // 重新计算自适应高度并重绘图表
       }
+      userDirectoryChart?.resize();
     });
 
     document.addEventListener("fullscreenchange", () => {
@@ -572,6 +920,7 @@ createApp({
     });
 
     onMounted(async () => {
+      loadChartVisibility();
       await Promise.all([loadConfig(), loadServers()]);
       attachSse();
       if (selectedServerId.value) {
@@ -582,16 +931,27 @@ createApp({
     return {
       directoryFilter,
       alertRows,
+      getAlertLevelMeta,
+      getAlertStatusMeta,
       clearAlert,
       clearAllAlerts,
       formatBytes,
       formatDateTime,
       formatFixed,
       formatPct,
+      formatSignedRate,
+      formatSignedSizeBytes,
       fullscreenChart,
       hoursRange,
+      chartToggleButtonType,
+      chartVisibility,
       loadDirectoryHistory,
       loadFilesystemHistory,
+      ownerUsageChangeRows,
+      ownerUsageSortBy,
+      ownerUsageSortOptions,
+      ownerUsageUnit,
+      ownerUsageUnitOptions,
       publicConfig,
       reloadConfig,
       refreshSelectedServer,
@@ -599,6 +959,7 @@ createApp({
       selectedServer,
       selectedServerId,
       servers,
+      toggleChartVisibility,
       toggleFullscreen,
       visibleAlerts
     };
