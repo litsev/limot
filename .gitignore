@@ -8,3 +8,4 @@ node_modules/
 limot_s/config/config.yaml
 limot_c/config.yaml
 limot_s/config/clients/*.yaml
+**/package-lock.json
