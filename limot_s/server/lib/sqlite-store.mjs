@@ -210,14 +210,14 @@ export class SqliteStore {
       await this.run(`
         CREATE TEMP TABLE temp_sys AS 
         SELECT 
-          strftime('%Y-%m-%dT%H:00:00.000Z', ts) as ts, client_id,
+          substr(ts, 1, 13) || ':00:00.000Z' as ts, client_id,
           MAX(hostname) as hostname, MAX(platform) as platform, MAX(release) as release, MAX(arch) as arch,
           AVG(uptime_sec) as uptime_sec, AVG(cpu_cores) as cpu_cores, AVG(cpu_pct) as cpu_pct, AVG(cpu_temp_c) as cpu_temp_c,
           AVG(mem_used_bytes) as mem_used_bytes, AVG(mem_total_bytes) as mem_total_bytes, AVG(mem_pct) as mem_pct,
           AVG(load1) as load1, AVG(load5) as load5, AVG(load15) as load15, AVG(load_per_core) as load_per_core,
           AVG(gpu_pct) as gpu_pct, AVG(gpu_mem_pct) as gpu_mem_pct
         FROM system_metrics WHERE ts >= ? AND ts <= ?
-        GROUP BY client_id, strftime('%Y-%m-%dT%H:00:00.000Z', ts)
+        GROUP BY client_id, substr(ts, 1, 13) || ':00:00.000Z'
       `, [startIso, endIso]);
       await this.run("DELETE FROM system_metrics WHERE ts >= ? AND ts <= ?", [startIso, endIso]);
       await this.run(`
