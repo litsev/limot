@@ -63,6 +63,7 @@ export class ConfigStore {
     this.version = 0;
     this.watchTimer = null;
     this.watcher = null;
+    this.clientWatcher = null;
   }
 
   async load(reason = "manual") {
@@ -130,16 +131,43 @@ export class ConfigStore {
     }
 
     this.watcher = watch(this.configPath, () => {
-      clearTimeout(this.watchTimer);
-      this.watchTimer = setTimeout(async () => {
-        try {
-          await this.load("watch");
-          logger.info("config", "monitoring.json reloaded from file change");
-        } catch (error) {
-          logger.error("config", `reload failed: ${error.message}`);
-        }
-      }, 250);
+      this.scheduleReload();
     });
+
+    try {
+      const clientsDir = join(this.configDir, "clients");
+      this.clientWatcher = watch(clientsDir, () => {
+        this.scheduleReload();
+      });
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        logger.error("config", `failed to watch client configs: ${error.message}`);
+      }
+    }
+  }
+
+  scheduleReload() {
+    clearTimeout(this.watchTimer);
+    this.watchTimer = setTimeout(async () => {
+      try {
+        await this.load("watch");
+        logger.info("config", "config reloaded from file change");
+      } catch (error) {
+        logger.error("config", `reload failed: ${error.message}`);
+      }
+    }, 250);
+  }
+
+  closeWatchers() {
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+
+    if (this.clientWatcher) {
+      this.clientWatcher.close();
+      this.clientWatcher = null;
+    }
   }
 
   onReload(listener) {

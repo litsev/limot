@@ -10,7 +10,9 @@ export class WechatNotifier {
     this.bot = new WeixinBot();
     this.started = false;
     this.tokensFile = join(process.cwd(), 'data', 'wechat-tokens.json');
+    this.outboxFile = join(process.cwd(), 'data', 'wechat-outbox.json');
     this.tokensInfo = {};
+    this.outbox = {};
   }
 
   async loadTokens() {
@@ -34,6 +36,68 @@ export class WechatNotifier {
     } catch (e) {
       logger.error('wechat', `Failed to save tokens: ${e.message}`);
     }
+  }
+
+  async loadOutbox() {
+    try {
+      const content = await readFile(this.outboxFile, 'utf8');
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed === 'object') {
+        this.outbox = parsed;
+      }
+      logger.info('wechat', `Loaded queued messages for ${Object.keys(this.outbox).length} users.`);
+    } catch (e) {
+      if (e.code !== 'ENOENT') {
+        logger.error('wechat', `Failed to load outbox: ${e.message}`);
+      }
+    }
+  }
+
+  async saveOutbox() {
+    try {
+      await writeFile(this.outboxFile, JSON.stringify(this.outbox, null, 2), 'utf8');
+    } catch (e) {
+      logger.error('wechat', `Failed to save outbox: ${e.message}`);
+    }
+  }
+
+  async enqueueFailedMessage(userId, content, reason = 'unknown') {
+    if (!Array.isArray(this.outbox[userId])) {
+      this.outbox[userId] = [];
+    }
+    this.outbox[userId].push({
+      content,
+      failedAt: new Date().toISOString(),
+      reason
+    });
+    await this.saveOutbox();
+    logger.info('wechat', `Queued failed message for ${userId}. queueSize=${this.outbox[userId].length}`);
+  }
+
+  async flushOutboxForUser(userId) {
+    const queue = this.outbox[userId];
+    if (!Array.isArray(queue) || queue.length === 0) {
+      return;
+    }
+
+    logger.info('wechat', `Retrying queued messages for ${userId}, count=${queue.length}`);
+    const remaining = [];
+
+    for (const item of queue) {
+      try {
+        await this.bot.send(userId, item.content);
+      } catch (e) {
+        remaining.push(item);
+        logger.error('wechat', `Retry failed for ${userId}: ${e.message}`);
+      }
+    }
+
+    if (remaining.length > 0) {
+      this.outbox[userId] = remaining;
+    } else {
+      delete this.outbox[userId];
+    }
+    await this.saveOutbox();
   }
 
   startExpiryChecker() {
@@ -64,6 +128,7 @@ export class WechatNotifier {
     if (this.started) return;
     try {
       await this.loadTokens();
+      await this.loadOutbox();
 
       // 劫持代理 SDK 内部保存 Token 的逻辑，以便它改变时自动备份
       const originalSet = this.bot.contextTokens.set.bind(this.bot.contextTokens);
@@ -80,6 +145,8 @@ export class WechatNotifier {
       this.bot.onMessage(async (msg) => {
         const text = (msg.text || '').trim();
         logger.info('wechat', `收到来自 ${msg.userId} 的消息: ${text}`);
+
+        await this.flushOutboxForUser(msg.userId);
         
         if (text === 'userid' || text === 'id') {
           await this.bot.reply(msg, `你的 userId 为: ${msg.userId}\n请配置到 config.yaml 的 wechat.subscribers 中。`);
@@ -162,6 +229,7 @@ export class WechatNotifier {
         logger.info('wechat', `Successfully sent alert to ${userId}`);
       } catch (e) {
         logger.error('wechat', `Send fail to ${userId}: ${e.message}`);
+        await this.enqueueFailedMessage(userId, content, e.message);
       }
     }
   }

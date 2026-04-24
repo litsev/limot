@@ -74,7 +74,10 @@ export class SqliteStore {
           ts TEXT, client_id TEXT, dir_key TEXT, dir_path TEXT, owner TEXT, size_bytes REAL
         )`,
       ["ts", "client_id", "dir_key", "dir_path", "owner", "size_bytes"],
-      [`CREATE INDEX IF NOT EXISTS idx_directory_metrics ON directory_metrics(client_id, ts)`]
+      [
+        `CREATE INDEX IF NOT EXISTS idx_directory_metrics ON directory_metrics(client_id, ts)`,
+        `CREATE INDEX IF NOT EXISTS idx_directory_metrics_dir_latest ON directory_metrics(client_id, dir_key, ts, id)`
+      ]
     );
 
     await this.ensureAutoincrementPrimaryKeyTable(
@@ -215,7 +218,7 @@ export class SqliteStore {
           AVG(gpu_pct) as gpu_pct, AVG(gpu_mem_pct) as gpu_mem_pct
         FROM system_metrics WHERE ts >= ? AND ts <= ?
         GROUP BY client_id, strftime('%Y-%m-%dT%H:00:00.000Z', ts)
-      `);
+      `, [startIso, endIso]);
       await this.run("DELETE FROM system_metrics WHERE ts >= ? AND ts <= ?", [startIso, endIso]);
       await this.run(`
         INSERT INTO system_metrics(
@@ -285,19 +288,35 @@ export class SqliteStore {
       return;
     }
 
-    const ownerUsage = new Map();
-    for (const directory of directories) {
-      if (!Number.isFinite(directory?.sizeBytes) || !directory?.owner) {
+    const ownerUsageRows = await this.all(
+      `SELECT latest.owner AS owner, SUM(latest.size_bytes) AS size_bytes
+       FROM directory_metrics latest
+       WHERE latest.client_id = ?
+         AND latest.ts <= ?
+         AND latest.size_bytes IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM directory_metrics newer
+           WHERE newer.client_id = latest.client_id
+             AND newer.dir_key = latest.dir_key
+             AND newer.ts <= ?
+             AND newer.size_bytes IS NOT NULL
+             AND (
+               newer.ts > latest.ts
+               OR (newer.ts = latest.ts AND newer.id > latest.id)
+             )
+         )
+       GROUP BY latest.owner`,
+      [clientId, collectedAt, collectedAt]
+    );
+
+    for (const row of ownerUsageRows) {
+      if (!row?.owner || !Number.isFinite(Number(row.size_bytes))) {
         continue;
       }
-      const current = ownerUsage.get(directory.owner) ?? 0;
-      ownerUsage.set(directory.owner, current + Number(directory.sizeBytes));
-    }
-
-    for (const [owner, sizeBytes] of ownerUsage.entries()) {
       await this.run(
         `INSERT INTO user_directory_usage(client_id, ts, owner, size_bytes) VALUES (?, ?, ?, ?)`,
-        [clientId, collectedAt, owner, sizeBytes]
+        [clientId, collectedAt, row.owner, Number(row.size_bytes)]
       );
     }
   }
