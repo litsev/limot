@@ -254,6 +254,19 @@ export class SqliteStore {
     await this.appendOwnerDirectoryUsage(clientId, collectedAt, report.directories);
   }
 
+  async appendBatchReports(clientId, reports) {
+    await this.run("BEGIN TRANSACTION");
+    try {
+      for (const report of reports) {
+        await this.appendReport(clientId, report);
+      }
+      await this.run("COMMIT");
+    } catch (e) {
+      try { await this.run("ROLLBACK"); } catch {}
+      throw e;
+    }
+  }
+
   async appendReport(clientId, report) {
     const collectedAt = report.collectedAt ?? new Date().toISOString();
     if (report.system) {

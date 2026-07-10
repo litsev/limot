@@ -10,7 +10,7 @@ const MIME_TYPES = {
   ".txt": "text/plain; charset=utf-8"
 };
 
-export async function readJsonBody(req, limitBytes = 1_000_000) {
+export async function readJsonBody(req, limitBytes = 5_000_000) {
   const chunks = [];
   let size = 0;
 

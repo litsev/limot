@@ -11,6 +11,8 @@ const DEFAULT_CONFIG = {
     configPullIntervalSec: 60,
     heartbeatIntervalSec: 10,
     reportBatchMax: 50,
+    reportBatchSendSize: 100,
+    diskIoUtilThreshold: 80,
     thresholds: {
       cpuWarn: 85,
       cpuCritical: 95,
@@ -208,6 +210,8 @@ export class ConfigStore {
       heartbeatIntervalSec:
         client.heartbeatIntervalSec ?? this.config.defaults.heartbeatIntervalSec,
       reportBatchMax: client.reportBatchMax ?? this.config.defaults.reportBatchMax,
+      reportBatchSendSize: client.reportBatchSendSize ?? this.config.defaults.reportBatchSendSize,
+      diskIoUtilThreshold: client.diskIoUtilThreshold ?? this.config.defaults.diskIoUtilThreshold,
       thresholds: {
         ...(this.config.defaults.thresholds ?? {}),
         ...(client.thresholds ?? {})

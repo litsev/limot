@@ -417,6 +417,63 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/agent/report_batch") {
+    await handleAgentRequest(req, res, async ({ clientId, payload }) => {
+      const { reports } = payload;
+      if (!Array.isArray(reports) || reports.length === 0) {
+        throw new Error("Missing or empty reports array");
+      }
+      if (reports.length > 100) {
+        throw new Error("Batch too large (max 100)");
+      }
+
+      // 写入全部指标到 SQLite（单事务，大幅减少 fsync）
+      await sqliteStore.appendBatchReports(clientId, reports);
+
+      // 仅用最后一条（最新）更新内存状态 + 触发告警通知
+      const lastReport = reports[reports.length - 1];
+      const { resolvedAlerts, newAlerts, upgradedAlerts, downgradedAlerts } =
+        monitorStore.upsertReport(clientId, lastReport);
+      await sqliteStore.upsertAlerts(clientId, lastReport.collectedAt, lastReport.currentAlerts ?? []);
+
+      if (newAlerts && newAlerts.length > 0) {
+        const text = newAlerts.map(a => {
+          const icon = a.level === 'critical' ? '🚨 严重' : '⚠️ 普通';
+          let str = `${icon}告警 [${clientId}]: ${a.message} (当前: ${a.currentValue})`;
+          if (a.alertDetails && Array.isArray(a.alertDetails) && a.alertDetails.length > 0) {
+            str += `\n🔍 异常进程:\n` + a.alertDetails.map(d => `  - ${d}`).join("\n");
+          }
+          return str;
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+      if (upgradedAlerts && upgradedAlerts.length > 0) {
+        const text = upgradedAlerts.map((alert) => {
+          const icon = alert.level === "critical" ? "🚨 严重" : "⚠️ 普通";
+          return buildAlertMessage(alert, clientId, `${icon}告警升级`);
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+      if (downgradedAlerts && downgradedAlerts.length > 0) {
+        const text = downgradedAlerts.map((alert) => {
+          const icon = alert.level === "critical" ? "🚨 严重" : "⚠️ 普通";
+          return buildAlertMessage(alert, clientId, `${icon}告警降级`);
+        }).join("\n\n");
+        wechatNotifier.notify(text);
+      }
+      if (resolvedAlerts.length > 0) {
+        const text = resolvedAlerts.map(a => `✅ 告警恢复 [${clientId}]: ${a.message}`).join("\n");
+        wechatNotifier.notify(text);
+      }
+
+      return {
+        acceptedAt: new Date().toISOString(),
+        processed: reports.length
+      };
+    });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/agent/heartbeat") {
     await handleAgentRequest(req, res, async ({ clientId, payload }) => {
       monitorStore.upsertHeartbeat(clientId, payload);

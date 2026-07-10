@@ -89,6 +89,122 @@ export function stopGpuSampler() {
   gpuSampler.stop();
 }
 
+// ==================== 磁盘 I/O 负载采样器 ====================
+
+class DiskIoSampler {
+  constructor(sampleDurationMs = 200) {
+    this.sampleDurationMs = sampleDurationMs;
+    this.mountDeviceMap = new Map(); // mount -> /dev/xxx
+    this.deviceUtil = new Map();     // deviceName -> util%
+    this.started = false;
+    this.timer = null;
+  }
+
+  start(intervalMs = 5000) {
+    if (this.started) return;
+    this.started = true;
+    this.intervalMs = intervalMs;
+    this.refreshMountMap();
+    this.timer = setInterval(() => this.update(), this.intervalMs);
+    this.timer.unref();
+  }
+
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.started = false;
+  }
+
+  async refreshMountMap() {
+    try {
+      const { stdout } = await execFileAsync("df", ["-kPT"]);
+      const lines = stdout.split(/\r?\n/).slice(1).filter(Boolean);
+      const newMap = new Map();
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 7) {
+          newMap.set(parts[6], parts[0]); // mount -> device
+        }
+      }
+      this.mountDeviceMap = newMap;
+    } catch {}
+  }
+
+  getDeviceForPath(dirPath) {
+    let bestMount = "";
+    let bestDevice = null;
+    for (const [mount, device] of this.mountDeviceMap) {
+      if (dirPath === mount || dirPath.startsWith(mount + "/")) {
+        if (mount.length > bestMount.length) {
+          bestMount = mount;
+          bestDevice = device;
+        }
+      }
+    }
+    return bestDevice;
+  }
+
+  async readDiskstats() {
+    try {
+      const content = await readFile("/proc/diskstats", "utf-8");
+      const stats = new Map();
+      for (const line of content.trim().split("\n")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 13) continue;
+        // Field 10: time spent doing I/O (ms)
+        stats.set(parts[2], Number(parts[12]));
+      }
+      return stats;
+    } catch {
+      return new Map();
+    }
+  }
+
+  async update() {
+    try {
+      const s1 = await this.readDiskstats();
+      await new Promise(r => setTimeout(r, this.sampleDurationMs));
+      const s2 = await this.readDiskstats();
+
+      for (const [device, v2] of s2) {
+        const v1 = s1.get(device);
+        if (v1 === undefined) continue;
+        const delta = v2 - v1;
+        const util = Math.min(100, Math.max(0, (delta / this.sampleDurationMs) * 100));
+        this.deviceUtil.set(device, util);
+      }
+    } catch {}
+  }
+
+  isPathBusy(dirPath, threshold) {
+    const device = this.getDeviceForPath(dirPath);
+    if (!device) return false;
+
+    const baseName = device.replace(/^\/dev\//, "");
+    // 检查分区级别
+    const partUtil = this.deviceUtil.get(baseName) ?? 0;
+    if (partUtil >= threshold) return true;
+
+    // 检查整盘级别（去掉分区号）
+    const wholeDisk = baseName.replace(/p?\d+$/, "");
+    if (wholeDisk !== baseName) {
+      const diskUtil = this.deviceUtil.get(wholeDisk) ?? 0;
+      if (diskUtil >= threshold) return true;
+    }
+
+    return false;
+  }
+}
+
+const diskIoSampler = new DiskIoSampler();
+
+export function startDiskIoSampler() {
+  diskIoSampler.start();
+}
+
+export function stopDiskIoSampler() {
+  diskIoSampler.stop();
+}
+
 function getCpuUsageCached() {
   return cpuSampler.getCachedValue();
 }
@@ -479,6 +595,8 @@ export async function collectDirectoryMetrics(runtimeConfig) {
     }
   }
 
+  const diskIoThreshold = runtimeConfig.diskIoUtilThreshold ?? 80;
+
   for (const target of targetDirs) {
     const { dirPath, owner, ruleWarnGB, timeoutSec, scanIntervalSec } = target;
     
@@ -494,6 +612,29 @@ export async function collectDirectoryMetrics(runtimeConfig) {
         sizeBytes: cached.sizeBytes,
         isCached: true
       });
+      continue;
+    }
+
+    // 磁盘 I/O 负载检查：高负载时跳过本次扫描，使用缓存
+    if (diskIoThreshold > 0 && diskIoSampler.isPathBusy(dirPath, diskIoThreshold)) {
+      if (cached) {
+        results.push({
+          key: dirPath,
+          path: dirPath,
+          owner: owner,
+          warnGB: ruleWarnGB,
+          sizeBytes: cached.sizeBytes,
+          isCached: true
+        });
+      } else {
+        results.push({
+          key: dirPath,
+          path: dirPath,
+          owner: owner,
+          warnGB: ruleWarnGB,
+          sizeBytes: null
+        });
+      }
       continue;
     }
 

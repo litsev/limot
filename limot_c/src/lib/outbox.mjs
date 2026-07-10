@@ -14,32 +14,29 @@ export async function outboxCount(filePath) {
   return items.length;
 }
 
-export async function flushOutbox(filePath, maxBatch, sendFn) {
+export async function flushOutbox(filePath, maxBatch, sendBatchFn, batchSize = 1) {
   const items = (await readJsonFile(filePath, [])) ?? [];
   if (items.length === 0) {
-    return {
-      sent: 0,
-      remaining: 0
-    };
+    return { sent: 0, remaining: 0 };
   }
 
   const remaining = [...items];
   let sent = 0;
 
   while (remaining.length > 0 && sent < maxBatch) {
+    const count = Math.min(batchSize, maxBatch - sent);
+    const chunk = remaining.splice(0, count);
     try {
-      await sendFn(remaining[0].payload);
-      remaining.shift();
-      sent += 1;
+      await sendBatchFn(chunk.map(item => item.payload));
+      sent += chunk.length;
     } catch {
+      // 发送失败，放回队列头部
+      remaining.unshift(...chunk);
       break;
     }
   }
 
   await writeJsonFile(filePath, remaining);
-  return {
-    sent,
-    remaining: remaining.length
-  };
+  return { sent, remaining: remaining.length };
 }
 

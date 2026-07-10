@@ -2,7 +2,7 @@ import os from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics, startCpuSampler, stopCpuSampler, startGpuSampler, stopGpuSampler, exportAlertProgressState, restoreAlertProgressState, resetDirectoryScanTimersForMount } from "./lib/collectors.mjs";
+import { buildCurrentAlerts, collectDirectoryMetrics, collectFilesystemMetrics, collectGpuMetrics, collectSystemMetrics, startCpuSampler, stopCpuSampler, startGpuSampler, stopGpuSampler, startDiskIoSampler, stopDiskIoSampler, exportAlertProgressState, restoreAlertProgressState, resetDirectoryScanTimersForMount } from "./lib/collectors.mjs";
 import { postJson } from "./lib/http-client.mjs";
 import { enqueueOutbox, flushOutbox, outboxCount } from "./lib/outbox.mjs";
 import { appendLog, readJsonFile, readConfigFile, sleep, writeJsonFile, getLocalTimeString } from "./lib/utils.mjs";
@@ -279,9 +279,14 @@ async function reportLoop() {
       const flushResult = await flushOutbox(
         outboxPath,
         config.reportBatchMax ?? 50,
-        async (queuedPayload) => {
-          await sendReportPayload(queuedPayload);
-        }
+        async (payloads) => {
+          if (payloads.length === 1) {
+            await sendReportPayload(payloads[0]);
+          } else {
+            await agentRequest("/api/agent/report_batch", { reports: payloads });
+          }
+        },
+        config.reportBatchSendSize ?? 20
       );
       if (flushResult.sent > 0) {
         await log(`flushed ${flushResult.sent} cached reports`);
@@ -342,6 +347,8 @@ startCpuSampler();
 await log("CPU sampler started");
 startGpuSampler();
 await log("GPU sampler started");
+startDiskIoSampler();
+await log("Disk I/O sampler started");
 
 try {
   await syncRuntimeConfig();
@@ -356,6 +363,8 @@ try {
 } finally {
   stopCpuSampler();
   stopGpuSampler();
+  stopDiskIoSampler();
   await log("CPU sampler stopped");
   await log("GPU sampler stopped");
+  await log("Disk I/O sampler stopped");
 }
